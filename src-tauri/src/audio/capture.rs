@@ -41,13 +41,14 @@ impl AudioCapture {
         let wav_writer = AudioWavWriter::new(&self.output_path, sample_rate, channels)?;
         let writer_handle = wav_writer.writer_handle();
 
-        let error_flag = self.write_error.clone();
-        let stream_error_flag = self.write_error.clone();
-        let stream = match config.sample_format() {
-            SampleFormat::I16 => self.build_stream_i16(&input_device, &config.into(), writer_handle, error_flag, stream_error_flag),
-            SampleFormat::F32 => self.build_stream_f32(&input_device, &config.into(), writer_handle, error_flag, stream_error_flag),
-            format => Err(format!("Unsupported sample format: {:?}", format)),
-        }?;
+        let sample_format = config.sample_format();
+        let stream = Self::build_input_stream(
+            &input_device,
+            &config.into(),
+            sample_format,
+            writer_handle,
+            self.write_error.clone(),
+        )?;
 
         stream.play().map_err(|e| format!("Failed to play stream: {}", e))?;
         self.streams.push(stream);
@@ -72,80 +73,69 @@ impl AudioCapture {
         Ok(self.output_path.clone())
     }
 
-    fn build_stream_i16(
-        &self,
+    fn build_input_stream(
         device: &Device,
         config: &StreamConfig,
+        sample_format: SampleFormat,
         writer: WavWriterHandle,
         error_flag: Arc<AtomicBool>,
-        stream_error_flag: Arc<AtomicBool>,
     ) -> Result<Stream, String> {
-        let stream = device
-            .build_input_stream(
-                config,
-                move |data: &[i16], _| {
-                    if error_flag.load(Ordering::Relaxed) {
-                        return;
-                    }
-                    let Ok(mut guard) = writer.lock() else {
-                        error_flag.store(true, Ordering::Relaxed);
-                        return;
-                    };
-                    if let Some(ref mut w) = *guard {
-                        for &sample in data {
-                            if w.write_sample(sample).is_err() {
-                                error_flag.store(true, Ordering::Relaxed);
-                                return;
+        let stream_error_flag = error_flag.clone();
+        let err_callback = move |_err: cpal::StreamError| {
+            stream_error_flag.store(true, Ordering::Relaxed);
+        };
+
+        match sample_format {
+            SampleFormat::I16 => device
+                .build_input_stream(
+                    config,
+                    move |data: &[i16], _| {
+                        if error_flag.load(Ordering::Relaxed) {
+                            return;
+                        }
+                        let Ok(mut guard) = writer.lock() else {
+                            error_flag.store(true, Ordering::Relaxed);
+                            return;
+                        };
+                        if let Some(ref mut w) = *guard {
+                            for &sample in data {
+                                if w.write_sample(sample).is_err() {
+                                    error_flag.store(true, Ordering::Relaxed);
+                                    return;
+                                }
                             }
                         }
-                    }
-                },
-                move |_err| {
-                    stream_error_flag.store(true, Ordering::Relaxed);
-                },
-                None,
-            )
-            .map_err(|e| format!("Failed to build input stream: {}", e))?;
-
-        Ok(stream)
-    }
-
-    fn build_stream_f32(
-        &self,
-        device: &Device,
-        config: &StreamConfig,
-        writer: WavWriterHandle,
-        error_flag: Arc<AtomicBool>,
-        stream_error_flag: Arc<AtomicBool>,
-    ) -> Result<Stream, String> {
-        let stream = device
-            .build_input_stream(
-                config,
-                move |data: &[f32], _| {
-                    if error_flag.load(Ordering::Relaxed) {
-                        return;
-                    }
-                    let Ok(mut guard) = writer.lock() else {
-                        error_flag.store(true, Ordering::Relaxed);
-                        return;
-                    };
-                    if let Some(ref mut w) = *guard {
-                        for &sample in data {
-                            let sample_i16 = (sample * i16::MAX as f32) as i16;
-                            if w.write_sample(sample_i16).is_err() {
-                                error_flag.store(true, Ordering::Relaxed);
-                                return;
+                    },
+                    err_callback,
+                    None,
+                )
+                .map_err(|e| format!("Failed to build input stream: {}", e)),
+            SampleFormat::F32 => device
+                .build_input_stream(
+                    config,
+                    move |data: &[f32], _| {
+                        if error_flag.load(Ordering::Relaxed) {
+                            return;
+                        }
+                        let Ok(mut guard) = writer.lock() else {
+                            error_flag.store(true, Ordering::Relaxed);
+                            return;
+                        };
+                        if let Some(ref mut w) = *guard {
+                            for &sample in data {
+                                let sample_i16 = (sample * i16::MAX as f32) as i16;
+                                if w.write_sample(sample_i16).is_err() {
+                                    error_flag.store(true, Ordering::Relaxed);
+                                    return;
+                                }
                             }
                         }
-                    }
-                },
-                move |_err| {
-                    stream_error_flag.store(true, Ordering::Relaxed);
-                },
-                None,
-            )
-            .map_err(|e| format!("Failed to build input stream: {}", e))?;
-
-        Ok(stream)
+                    },
+                    err_callback,
+                    None,
+                )
+                .map_err(|e| format!("Failed to build input stream: {}", e)),
+            format => Err(format!("Unsupported sample format: {:?}", format)),
+        }
     }
 }
