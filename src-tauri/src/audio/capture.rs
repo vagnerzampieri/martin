@@ -67,9 +67,11 @@ impl AudioCapture {
     }
 
     fn start_pw_record(path: &PathBuf, sample_rate: u32, channels: u16) -> Option<Child> {
+        let sink_serial = Self::get_default_sink_serial()?;
+
         Command::new("pw-record")
             .arg("--target")
-            .arg("@DEFAULT_AUDIO_SINK@")
+            .arg(sink_serial)
             .arg("--rate")
             .arg(sample_rate.to_string())
             .arg("--channels")
@@ -82,6 +84,21 @@ impl AudioCapture {
             .stderr(std::process::Stdio::null())
             .spawn()
             .ok()
+    }
+
+    fn get_default_sink_serial() -> Option<String> {
+        let output = Command::new("wpctl")
+            .args(["inspect", "@DEFAULT_AUDIO_SINK@"])
+            .output()
+            .ok()?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            if line.contains("object.serial") {
+                return line.split('"').nth(1).map(|s| s.to_string());
+            }
+        }
+        None
     }
 
     pub fn stop(&mut self) -> Result<PathBuf, String> {
