@@ -72,12 +72,8 @@ impl Store {
             })
             .map_err(|e| format!("Failed to query: {}", e))?;
 
-        let mut transcriptions = Vec::new();
-        for row in rows {
-            transcriptions.push(row.map_err(|e| format!("Failed to read row: {}", e))?);
-        }
-
-        Ok(transcriptions)
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("Failed to read row: {}", e))
     }
 
     pub fn get(&self, id: i64) -> Result<Transcription, String> {
@@ -100,9 +96,14 @@ impl Store {
     }
 
     pub fn delete(&self, id: i64) -> Result<(), String> {
-        self.conn
+        let affected = self
+            .conn
             .execute("DELETE FROM transcriptions WHERE id = ?1", params![id])
             .map_err(|e| format!("Failed to delete: {}", e))?;
+
+        if affected == 0 {
+            return Err(format!("Transcription with id {} not found", id));
+        }
         Ok(())
     }
 }
