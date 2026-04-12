@@ -23,6 +23,7 @@ unsafe impl Sync for SendableCapture {}
 pub struct AppState {
     capture: Mutex<SendableCapture>,
     store: Mutex<Store>,
+    transcriber: Mutex<Option<Transcriber>>,
     model_path: PathBuf,
     data_dir: PathBuf,
 }
@@ -64,11 +65,16 @@ async fn transcribe_recording(state: State<'_, AppState>, title: String, languag
         return Err("No recording found. Record a meeting first.".to_string());
     }
 
-    // Run transcription on a blocking thread to avoid freezing the UI
+    // Take the cached transcriber or create a new one
+    let transcriber = state.transcriber.lock().map_err(|e| e.to_string())?.take();
+
     let audio_path_clone = audio_path.clone();
     let lang = language.clone();
-    let (text, duration_secs) = tauri::async_runtime::spawn_blocking(move || -> Result<(String, f64), String> {
-        let transcriber = Transcriber::new(&model_path)?;
+    let (text, duration_secs, transcriber) = tauri::async_runtime::spawn_blocking(move || -> Result<(String, f64, Transcriber), String> {
+        let transcriber = match transcriber {
+            Some(t) => t,
+            None => Transcriber::new(&model_path)?,
+        };
         let text = transcriber.transcribe(&audio_path_clone, &lang)?;
 
         let reader = hound::WavReader::open(&audio_path_clone)
@@ -76,10 +82,13 @@ async fn transcribe_recording(state: State<'_, AppState>, title: String, languag
         let spec = reader.spec();
         let duration_secs = reader.duration() as f64 / spec.sample_rate as f64;
 
-        Ok((text, duration_secs))
+        Ok((text, duration_secs, transcriber))
     })
     .await
     .map_err(|e| format!("Transcription task failed: {}", e))??;
+
+    // Return the transcriber to the cache for reuse
+    *state.transcriber.lock().map_err(|e| e.to_string())? = Some(transcriber);
 
     let store = state.store.lock().map_err(|e| e.to_string())?;
     let id = store.save(&title, &text, &language, duration_secs)?;
@@ -127,6 +136,7 @@ pub fn run() {
             app.manage(AppState {
                 capture: Mutex::new(SendableCapture(None)),
                 store: Mutex::new(store),
+                transcriber: Mutex::new(None),
                 model_path,
                 data_dir,
             });
