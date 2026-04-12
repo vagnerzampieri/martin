@@ -1,4 +1,4 @@
-# Martin
+# martin
 
 Privacy-first meeting transcriber for Linux. Records microphone and system audio, transcribes locally with Whisper, stores results in SQLite. No cloud, no internet — your audio never leaves your machine.
 
@@ -46,7 +46,7 @@ The binary will be in `src-tauri/target/release/martin`.
 
 ## Usage
 
-1. Open Martin
+1. Open martin
 2. Click **Start Recording** / **Iniciar Gravação**
 3. Have your meeting — both your mic and system audio are captured
 4. Click **Stop Recording** / **Parar Gravação**
@@ -55,7 +55,7 @@ The binary will be in `src-tauri/target/release/martin`.
 
 ## How audio capture works
 
-Martin records two audio sources simultaneously:
+martin records two audio sources simultaneously:
 
 - **Microphone** — captured via cpal (ALSA backend)
 - **System audio** — captured via `pw-record` targeting the default PipeWire sink

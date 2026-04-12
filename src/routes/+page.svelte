@@ -26,12 +26,18 @@
 
 <main>
     <header>
-        <h1>Martin</h1>
+        <h1>martin</h1>
         <nav>
-            <button class:active={currentView === "recorder"} onclick={showRecorder}>
+            <button
+                class:active={currentView === "recorder"}
+                onclick={showRecorder}
+            >
                 {t("record")}
             </button>
-            <button class:active={currentView === "history"} onclick={showHistory}>
+            <button
+                class:active={currentView === "history"}
+                onclick={showHistory}
+            >
                 {t("history")}
             </button>
         </nav>
