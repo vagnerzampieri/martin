@@ -39,15 +39,12 @@ impl Transcriber {
             .full_n_segments()
             .map_err(|e| format!("Failed to get segments: {}", e))?;
 
-        let mut text = String::new();
-        for i in 0..num_segments {
-            if let Ok(segment) = state.full_get_segment_text(i) {
-                text.push_str(&segment);
-                text.push('\n');
-            }
-        }
+        let segments: Vec<String> = (0..num_segments)
+            .map(|i| state.full_get_segment_text(i))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("Failed to extract segment text: {}", e))?;
 
-        Ok(text.trim().to_string())
+        Ok(segments.join("\n").trim().to_string())
     }
 
     fn load_wav_as_mono_f32(&self, path: &Path) -> Result<Vec<f32>, String> {
