@@ -43,9 +43,10 @@ impl AudioCapture {
         let writer_handle = wav_writer.writer_handle();
 
         let error_flag = self.write_error.clone();
+        let stream_error_flag = self.write_error.clone();
         let stream = match config.sample_format() {
-            SampleFormat::I16 => self.build_stream_i16(&input_device, &config.into(), writer_handle, error_flag),
-            SampleFormat::F32 => self.build_stream_f32(&input_device, &config.into(), writer_handle, error_flag),
+            SampleFormat::I16 => self.build_stream_i16(&input_device, &config.into(), writer_handle, error_flag, stream_error_flag),
+            SampleFormat::F32 => self.build_stream_f32(&input_device, &config.into(), writer_handle, error_flag, stream_error_flag),
             format => Err(format!("Unsupported sample format: {:?}", format)),
         }?;
 
@@ -78,6 +79,7 @@ impl AudioCapture {
         config: &StreamConfig,
         writer: Arc<Mutex<Option<WavWriter<std::io::BufWriter<std::fs::File>>>>>,
         error_flag: Arc<AtomicBool>,
+        stream_error_flag: Arc<AtomicBool>,
     ) -> Result<Stream, String> {
         let stream = device
             .build_input_stream(
@@ -99,7 +101,9 @@ impl AudioCapture {
                         }
                     }
                 },
-                |err| eprintln!("Audio stream error: {}", err),
+                move |_err| {
+                    stream_error_flag.store(true, Ordering::Relaxed);
+                },
                 None,
             )
             .map_err(|e| format!("Failed to build input stream: {}", e))?;
@@ -113,6 +117,7 @@ impl AudioCapture {
         config: &StreamConfig,
         writer: Arc<Mutex<Option<WavWriter<std::io::BufWriter<std::fs::File>>>>>,
         error_flag: Arc<AtomicBool>,
+        stream_error_flag: Arc<AtomicBool>,
     ) -> Result<Stream, String> {
         let stream = device
             .build_input_stream(
@@ -135,7 +140,9 @@ impl AudioCapture {
                         }
                     }
                 },
-                |err| eprintln!("Audio stream error: {}", err),
+                move |_err| {
+                    stream_error_flag.store(true, Ordering::Relaxed);
+                },
                 None,
             )
             .map_err(|e| format!("Failed to build input stream: {}", e))?;
