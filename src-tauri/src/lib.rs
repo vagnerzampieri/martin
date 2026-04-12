@@ -27,6 +27,12 @@ pub struct AppState {
     data_dir: PathBuf,
 }
 
+impl AppState {
+    fn audio_path(&self) -> PathBuf {
+        self.data_dir.join("recording.wav")
+    }
+}
+
 #[tauri::command]
 fn start_recording(state: State<'_, AppState>) -> Result<(), String> {
     let mut guard = state.capture.lock().map_err(|e| e.to_string())?;
@@ -34,7 +40,7 @@ fn start_recording(state: State<'_, AppState>) -> Result<(), String> {
         return Err("Recording already in progress".to_string());
     }
 
-    let audio_path = state.data_dir.join("recording.wav");
+    let audio_path = state.audio_path();
     let mut capture = AudioCapture::new(audio_path);
     capture.start()?;
     guard.0 = Some(capture);
@@ -51,7 +57,7 @@ fn stop_recording(state: State<'_, AppState>) -> Result<(), String> {
 
 #[tauri::command]
 async fn transcribe_recording(state: State<'_, AppState>, title: String, language: String) -> Result<Transcription, String> {
-    let audio_path = state.data_dir.join("recording.wav");
+    let audio_path = state.audio_path();
     let model_path = state.model_path.clone();
 
     if !audio_path.exists() {
