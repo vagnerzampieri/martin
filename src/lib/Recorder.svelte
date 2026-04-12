@@ -38,7 +38,7 @@
             transcribing = true;
             const now = new Date().toLocaleString("pt-BR");
             const result = await invoke("transcribe_recording", {
-                title: `Reuniao ${now}`,
+                title: `Reunião ${now}`,
                 language: "pt",
             });
             onTranscribed?.(result);
@@ -63,7 +63,7 @@
             Gravando... {formatTime(elapsed)}
         </div>
         <button class="btn-stop" onclick={stopRecording}>
-            Parar Gravacao
+            Parar Gravação
         </button>
     {:else if transcribing}
         <div class="status processing">
@@ -71,7 +71,7 @@
         </div>
     {:else}
         <button class="btn-start" onclick={startRecording}>
-            Iniciar Gravacao
+            Iniciar Gravação
         </button>
         <button class="btn-transcribe" onclick={transcribe}>
             Transcrever

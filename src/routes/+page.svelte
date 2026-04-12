@@ -31,7 +31,7 @@
                 Gravar
             </button>
             <button class:active={currentView === "history"} onclick={showHistory}>
-                Historico
+                Histórico
             </button>
         </nav>
     </header>

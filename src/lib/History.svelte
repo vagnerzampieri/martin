@@ -12,7 +12,7 @@
         try {
             transcriptions = await invoke("list_transcriptions");
         } catch (e) {
-            error = `Falha ao carregar transcricoes: ${e}`;
+            error = `Falha ao carregar transcrições: ${e}`;
         }
         loading = false;
     });
@@ -22,7 +22,7 @@
             await invoke("delete_transcription", { id });
             transcriptions = transcriptions.filter((t) => t.id !== id);
         } catch (e) {
-            error = `Falha ao excluir transcricao: ${e}`;
+            error = `Falha ao excluir transcrição: ${e}`;
         }
     }
 
@@ -38,7 +38,7 @@
 </script>
 
 <div class="history">
-    <h2>Historico</h2>
+    <h2>Histórico</h2>
 
     {#if error}
         <div class="error">{error}</div>
@@ -47,7 +47,7 @@
     {#if loading}
         <p class="muted">Carregando...</p>
     {:else if transcriptions.length === 0}
-        <p class="muted">Nenhuma transcricao ainda.</p>
+        <p class="muted">Nenhuma transcrição ainda.</p>
     {:else}
         <ul>
             {#each transcriptions as t}
