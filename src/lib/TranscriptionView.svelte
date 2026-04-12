@@ -1,15 +1,25 @@
 <script>
     let { transcription, onBack } = $props();
 
-    function copyToClipboard() {
-        navigator.clipboard.writeText(transcription.text);
+    let copied = $state(false);
+
+    async function copyToClipboard() {
+        try {
+            await navigator.clipboard.writeText(transcription.text);
+            copied = true;
+            setTimeout(() => { copied = false; }, 2000);
+        } catch (e) {
+            console.error("Failed to copy to clipboard:", e);
+        }
     }
 </script>
 
 <div class="view">
     <div class="header">
         <button class="btn-back" onclick={onBack}>← Voltar</button>
-        <button class="btn-copy" onclick={copyToClipboard}>Copiar texto</button>
+        <button class="btn-copy" onclick={copyToClipboard}>
+            {copied ? "Copiado!" : "Copiar texto"}
+        </button>
     </div>
 
     <h2>{transcription.title}</h2>
