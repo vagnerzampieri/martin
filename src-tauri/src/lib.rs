@@ -49,21 +49,30 @@ fn stop_recording(state: State<'_, AppState>) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn transcribe_recording(state: State<'_, AppState>, title: String, language: String) -> Result<Transcription, String> {
+async fn transcribe_recording(state: State<'_, AppState>, title: String, language: String) -> Result<Transcription, String> {
     let audio_path = state.data_dir.join("recording.wav");
+    let model_path = state.model_path.clone();
 
     if !audio_path.exists() {
         return Err("No recording found. Record a meeting first.".to_string());
     }
 
-    let transcriber = Transcriber::new(&state.model_path)?;
-    let text = transcriber.transcribe(&audio_path, &language)?;
+    // Run transcription on a blocking thread to avoid freezing the UI
+    let audio_path_clone = audio_path.clone();
+    let lang = language.clone();
+    let (text, duration_secs) = tauri::async_runtime::spawn_blocking(move || -> Result<(String, f64), String> {
+        let transcriber = Transcriber::new(&model_path)?;
+        let text = transcriber.transcribe(&audio_path_clone, &lang)?;
 
-    // Get audio duration from the WAV file
-    let reader = hound::WavReader::open(&audio_path)
-        .map_err(|e| format!("Failed to read WAV: {}", e))?;
-    let spec = reader.spec();
-    let duration_secs = reader.duration() as f64 / spec.sample_rate as f64;
+        let reader = hound::WavReader::open(&audio_path_clone)
+            .map_err(|e| format!("Failed to read WAV: {}", e))?;
+        let spec = reader.spec();
+        let duration_secs = reader.duration() as f64 / spec.sample_rate as f64;
+
+        Ok((text, duration_secs))
+    })
+    .await
+    .map_err(|e| format!("Transcription task failed: {}", e))??;
 
     let store = state.store.lock().map_err(|e| e.to_string())?;
     let id = store.save(&title, &text, &language, duration_secs)?;

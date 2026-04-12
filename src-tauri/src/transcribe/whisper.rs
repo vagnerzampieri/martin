@@ -55,6 +55,8 @@ impl Transcriber {
             hound::WavReader::open(path).map_err(|e| format!("Failed to open WAV: {}", e))?;
 
         let spec = reader.spec();
+        let source_sample_rate = spec.sample_rate;
+
         let samples: Vec<f32> = match spec.sample_format {
             hound::SampleFormat::Int => reader
                 .samples::<i16>()
@@ -67,13 +69,42 @@ impl Transcriber {
         };
 
         // Convert to mono if stereo
-        if spec.channels == 2 {
-            Ok(samples
+        let mono = if spec.channels == 2 {
+            samples
                 .chunks(2)
                 .map(|chunk| (chunk[0] + chunk.get(1).copied().unwrap_or(0.0)) / 2.0)
-                .collect())
+                .collect()
         } else {
-            Ok(samples)
+            samples
+        };
+
+        // Whisper requires 16kHz audio — resample if needed
+        const WHISPER_SAMPLE_RATE: u32 = 16000;
+        if source_sample_rate != WHISPER_SAMPLE_RATE {
+            Ok(Self::resample(&mono, source_sample_rate, WHISPER_SAMPLE_RATE))
+        } else {
+            Ok(mono)
         }
+    }
+
+    fn resample(samples: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
+        let ratio = from_rate as f64 / to_rate as f64;
+        let output_len = (samples.len() as f64 / ratio) as usize;
+        let mut output = Vec::with_capacity(output_len);
+
+        for i in 0..output_len {
+            let src_idx = i as f64 * ratio;
+            let idx = src_idx as usize;
+            let frac = src_idx - idx as f64;
+
+            let sample = if idx + 1 < samples.len() {
+                samples[idx] as f64 * (1.0 - frac) + samples[idx + 1] as f64 * frac
+            } else {
+                samples[idx] as f64
+            };
+            output.push(sample as f32);
+        }
+
+        output
     }
 }

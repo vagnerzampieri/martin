@@ -2,7 +2,7 @@
 set -euo pipefail
 
 MODEL="${1:-small}"
-MODELS_DIR="${2:-$HOME/.local/share/com.martin.app/models}"
+MODELS_DIR="${2:-$HOME/.local/share/com.nuuvem.martin/models}"
 
 VALID_MODELS="tiny base small medium"
 if ! echo "$VALID_MODELS" | grep -qw "$MODEL"; then
