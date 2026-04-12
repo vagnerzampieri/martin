@@ -26,35 +26,91 @@ impl AudioCapture {
     pub fn start(&mut self) -> Result<(), String> {
         let host = cpal::default_host();
 
-        // Get the default input device (microphone)
-        let input_device = host
+        let mic_device = host
             .default_input_device()
             .ok_or("No input device available")?;
 
-        let config = input_device
+        let mic_config = mic_device
             .default_input_config()
             .map_err(|e| format!("Failed to get input config: {}", e))?;
 
-        let sample_rate = config.sample_rate().0;
-        let channels = config.channels();
+        let sample_rate = mic_config.sample_rate().0;
+        let channels = mic_config.channels();
 
         let wav_writer = AudioWavWriter::new(&self.output_path, sample_rate, channels)?;
-        let writer_handle = wav_writer.writer_handle();
 
-        let sample_format = config.sample_format();
-        let stream = Self::build_input_stream(
-            &input_device,
-            &config.into(),
-            sample_format,
-            writer_handle,
+        // Start microphone stream
+        let mic_stream = Self::build_input_stream(
+            &mic_device,
+            &mic_config.clone().into(),
+            mic_config.sample_format(),
+            wav_writer.writer_handle(),
             self.write_error.clone(),
         )?;
+        mic_stream.play().map_err(|e| format!("Failed to play mic stream: {}", e))?;
+        self.streams.push(mic_stream);
 
-        stream.play().map_err(|e| format!("Failed to play stream: {}", e))?;
-        self.streams.push(stream);
+        // Try to find and start monitor stream (system audio)
+        if let Some(monitor_device) = Self::find_monitor_device(&host) {
+            match Self::start_monitor_stream(
+                &monitor_device,
+                sample_rate,
+                wav_writer.writer_handle(),
+                self.write_error.clone(),
+            ) {
+                Ok(stream) => self.streams.push(stream),
+                Err(e) => eprintln!("Warning: could not start monitor stream: {}", e),
+            }
+        }
+
         self.wav_writer = Some(wav_writer);
-
         Ok(())
+    }
+
+    fn find_monitor_device(host: &cpal::Host) -> Option<Device> {
+        let devices: Vec<(Device, String)> = host
+            .input_devices()
+            .ok()?
+            .filter_map(|d| {
+                let name = d.name().ok()?;
+                Some((d, name))
+            })
+            .collect();
+
+        let names: Vec<&str> = devices.iter().map(|(_, n)| n.as_str()).collect();
+        let monitor_name = find_monitor_device_name(&names)?.to_string();
+
+        devices
+            .into_iter()
+            .find(|(_, name)| *name == monitor_name)
+            .map(|(device, _)| device)
+    }
+
+    fn start_monitor_stream(
+        device: &Device,
+        target_sample_rate: u32,
+        writer: WavWriterHandle,
+        error_flag: Arc<AtomicBool>,
+    ) -> Result<Stream, String> {
+        let config = device
+            .default_input_config()
+            .map_err(|e| format!("Failed to get monitor config: {}", e))?;
+
+        let monitor_config = StreamConfig {
+            channels: config.channels(),
+            sample_rate: cpal::SampleRate(target_sample_rate),
+            buffer_size: cpal::BufferSize::Default,
+        };
+
+        let stream = Self::build_input_stream(
+            device,
+            &monitor_config,
+            config.sample_format(),
+            writer,
+            error_flag,
+        )?;
+        stream.play().map_err(|e| format!("Failed to play monitor stream: {}", e))?;
+        Ok(stream)
     }
 
     pub fn stop(&mut self) -> Result<PathBuf, String> {
@@ -137,5 +193,42 @@ impl AudioCapture {
                 .map_err(|e| format!("Failed to build input stream: {}", e)),
             format => Err(format!("Unsupported sample format: {:?}", format)),
         }
+    }
+}
+
+fn find_monitor_device_name<'a>(names: &[&'a str]) -> Option<&'a str> {
+    names.iter().find(|n| n.contains(".monitor")).copied()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn find_monitor_name_returns_first_monitor_source() {
+        let names = vec![
+            "alsa_input.pci-0000_00_1f.3.analog-stereo",
+            "alsa_output.pci-0000_00_1f.3.analog-stereo.monitor",
+            "alsa_output.hdmi-stereo.monitor",
+        ];
+        let result = find_monitor_device_name(&names);
+        assert_eq!(result, Some("alsa_output.pci-0000_00_1f.3.analog-stereo.monitor"));
+    }
+
+    #[test]
+    fn find_monitor_name_returns_none_when_no_monitor() {
+        let names = vec![
+            "alsa_input.pci-0000_00_1f.3.analog-stereo",
+            "bluez_input.some-bluetooth-mic",
+        ];
+        let result = find_monitor_device_name(&names);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn find_monitor_name_returns_none_for_empty_list() {
+        let names: Vec<&str> = vec![];
+        let result = find_monitor_device_name(&names);
+        assert!(result.is_none());
     }
 }
