@@ -7,7 +7,7 @@
     let transcribing = $state(false);
     let error = $state("");
     let elapsed = $state(0);
-    let timer = $state(null);
+    let timer = null;
 
     async function startRecording() {
         try {
@@ -41,10 +41,10 @@
                 title: `Reuniao ${now}`,
                 language: "pt",
             });
-            transcribing = false;
             onTranscribed?.(result);
         } catch (e) {
             error = e;
+        } finally {
             transcribing = false;
         }
     }

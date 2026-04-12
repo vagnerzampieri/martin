@@ -7,13 +7,8 @@
     let currentView = $state("recorder");
     let selectedTranscription = $state(null);
 
-    function onTranscribed(result) {
-        selectedTranscription = result;
-        currentView = "view";
-    }
-
-    function onSelect(t) {
-        selectedTranscription = t;
+    function showTranscription(transcription) {
+        selectedTranscription = transcription;
         currentView = "view";
     }
 
@@ -42,9 +37,9 @@
     </header>
 
     {#if currentView === "recorder"}
-        <Recorder {onTranscribed} />
+        <Recorder onTranscribed={showTranscription} />
     {:else if currentView === "history"}
-        <History {onSelect} />
+        <History onSelect={showTranscription} />
     {:else if currentView === "view" && selectedTranscription}
         <TranscriptionView
             transcription={selectedTranscription}
