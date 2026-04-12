@@ -1,24 +1,34 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, SampleFormat, Stream, StreamConfig};
 use std::path::PathBuf;
+use std::process::{Child, Command};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use super::mix::mix_wav_files;
 use super::wav_writer::{AudioWavWriter, WavWriterHandle};
 
 pub struct AudioCapture {
     output_path: PathBuf,
+    mic_path: PathBuf,
+    system_path: PathBuf,
     streams: Vec<Stream>,
     wav_writer: Option<AudioWavWriter>,
+    pw_record: Option<Child>,
     write_error: Arc<AtomicBool>,
 }
 
 impl AudioCapture {
     pub fn new(output_path: PathBuf) -> Self {
+        let mic_path = output_path.with_extension("mic.wav");
+        let system_path = output_path.with_extension("sys.wav");
         Self {
             output_path,
+            mic_path,
+            system_path,
             streams: Vec::new(),
             wav_writer: None,
+            pw_record: None,
             write_error: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -37,9 +47,8 @@ impl AudioCapture {
         let sample_rate = mic_config.sample_rate().0;
         let channels = mic_config.channels();
 
-        let wav_writer = AudioWavWriter::new(&self.output_path, sample_rate, channels)?;
+        let wav_writer = AudioWavWriter::new(&self.mic_path, sample_rate, channels)?;
 
-        // Start microphone stream
         let mic_stream = Self::build_input_stream(
             &mic_device,
             &mic_config.clone().into(),
@@ -49,81 +58,57 @@ impl AudioCapture {
         )?;
         mic_stream.play().map_err(|e| format!("Failed to play mic stream: {}", e))?;
         self.streams.push(mic_stream);
-
-        // Try to find and start monitor stream (system audio)
-        if let Some(monitor_device) = Self::find_monitor_device(&host) {
-            match Self::start_monitor_stream(
-                &monitor_device,
-                sample_rate,
-                wav_writer.writer_handle(),
-                self.write_error.clone(),
-            ) {
-                Ok(stream) => self.streams.push(stream),
-                Err(e) => eprintln!("Warning: could not start monitor stream: {}", e),
-            }
-        }
-
         self.wav_writer = Some(wav_writer);
+
+        // Start pw-record for system audio (best-effort)
+        self.pw_record = Self::start_pw_record(&self.system_path, sample_rate, channels);
+
         Ok(())
     }
 
-    fn find_monitor_device(host: &cpal::Host) -> Option<Device> {
-        let devices: Vec<(Device, String)> = host
-            .input_devices()
-            .ok()?
-            .filter_map(|d| {
-                let name = d.name().ok()?;
-                Some((d, name))
-            })
-            .collect();
-
-        let names: Vec<&str> = devices.iter().map(|(_, n)| n.as_str()).collect();
-        let monitor_name = find_monitor_device_name(&names)?.to_string();
-
-        devices
-            .into_iter()
-            .find(|(_, name)| *name == monitor_name)
-            .map(|(device, _)| device)
-    }
-
-    fn start_monitor_stream(
-        device: &Device,
-        target_sample_rate: u32,
-        writer: WavWriterHandle,
-        error_flag: Arc<AtomicBool>,
-    ) -> Result<Stream, String> {
-        let config = device
-            .default_input_config()
-            .map_err(|e| format!("Failed to get monitor config: {}", e))?;
-
-        let monitor_config = StreamConfig {
-            channels: config.channels(),
-            sample_rate: cpal::SampleRate(target_sample_rate),
-            buffer_size: cpal::BufferSize::Default,
-        };
-
-        let stream = Self::build_input_stream(
-            device,
-            &monitor_config,
-            config.sample_format(),
-            writer,
-            error_flag,
-        )?;
-        stream.play().map_err(|e| format!("Failed to play monitor stream: {}", e))?;
-        Ok(stream)
+    fn start_pw_record(path: &PathBuf, sample_rate: u32, channels: u16) -> Option<Child> {
+        Command::new("pw-record")
+            .arg("--target")
+            .arg("@DEFAULT_AUDIO_SINK@")
+            .arg("--rate")
+            .arg(sample_rate.to_string())
+            .arg("--channels")
+            .arg(channels.to_string())
+            .arg("--format")
+            .arg("s16")
+            .arg(path.as_os_str())
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .ok()
     }
 
     pub fn stop(&mut self) -> Result<PathBuf, String> {
-        // Drop streams to stop recording
+        // Stop mic stream
         self.streams.clear();
-
-        // Finalize the WAV file
         if let Some(writer) = self.wav_writer.take() {
             writer.finalize()?;
         }
 
+        // Stop pw-record
+        if let Some(mut child) = self.pw_record.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+
         if self.write_error.load(Ordering::Relaxed) {
             return Err("Audio recording encountered write errors. The recording may be incomplete or corrupted.".to_string());
+        }
+
+        // Mix mic + system audio if system WAV exists
+        if self.system_path.exists() {
+            mix_wav_files(&self.mic_path, &self.system_path, &self.output_path)?;
+            let _ = std::fs::remove_file(&self.mic_path);
+            let _ = std::fs::remove_file(&self.system_path);
+        } else {
+            std::fs::rename(&self.mic_path, &self.output_path)
+                .map_err(|e| format!("Failed to rename mic recording: {}", e))?;
         }
 
         Ok(self.output_path.clone())
@@ -196,39 +181,3 @@ impl AudioCapture {
     }
 }
 
-fn find_monitor_device_name<'a>(names: &[&'a str]) -> Option<&'a str> {
-    names.iter().find(|n| n.contains(".monitor")).copied()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn find_monitor_name_returns_first_monitor_source() {
-        let names = vec![
-            "alsa_input.pci-0000_00_1f.3.analog-stereo",
-            "alsa_output.pci-0000_00_1f.3.analog-stereo.monitor",
-            "alsa_output.hdmi-stereo.monitor",
-        ];
-        let result = find_monitor_device_name(&names);
-        assert_eq!(result, Some("alsa_output.pci-0000_00_1f.3.analog-stereo.monitor"));
-    }
-
-    #[test]
-    fn find_monitor_name_returns_none_when_no_monitor() {
-        let names = vec![
-            "alsa_input.pci-0000_00_1f.3.analog-stereo",
-            "bluez_input.some-bluetooth-mic",
-        ];
-        let result = find_monitor_device_name(&names);
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn find_monitor_name_returns_none_for_empty_list() {
-        let names: Vec<&str> = vec![];
-        let result = find_monitor_device_name(&names);
-        assert!(result.is_none());
-    }
-}
