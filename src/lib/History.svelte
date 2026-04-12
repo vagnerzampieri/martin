@@ -8,6 +8,8 @@
     let transcriptions = $state([]);
     let loading = $state(true);
     let error = $state("");
+    let claudeAvailable = $state(false);
+    let summarizingId = $state(null);
 
     onMount(async () => {
         try {
@@ -16,12 +18,32 @@
             error = `${t("loadError")}: ${e}`;
         }
         loading = false;
+
+        try {
+            claudeAvailable = await invoke("check_claude_cli");
+        } catch {
+            claudeAvailable = false;
+        }
     });
+
+    async function summarize(id) {
+        summarizingId = id;
+        error = "";
+        try {
+            const summary = await invoke("summarize_transcription", { id });
+            transcriptions = transcriptions.map((item) =>
+                item.id === id ? { ...item, summary } : item
+            );
+        } catch (e) {
+            error = `${t("summarize")}: ${e}`;
+        }
+        summarizingId = null;
+    }
 
     async function remove(id) {
         try {
             await invoke("delete_transcription", { id });
-            transcriptions = transcriptions.filter((t) => t.id !== id);
+            transcriptions = transcriptions.filter((item) => item.id !== id);
         } catch (e) {
             error = `${t("deleteError")}: ${e}`;
         }
@@ -51,15 +73,30 @@
         <p class="muted">{t("noTranscriptions")}</p>
     {:else}
         <ul>
-            {#each transcriptions as t}
+            {#each transcriptions as item}
                 <li>
-                    <button class="item" onclick={() => onSelect?.(t)}>
-                        <span class="title">{t.title}</span>
+                    <button class="item" onclick={() => onSelect?.(item)}>
+                        <span class="title">
+                            {item.title}
+                            {#if item.summary}
+                                <span class="summary-badge" title={t("summary")}>S</span>
+                            {/if}
+                        </span>
                         <span class="meta">
-                            {formatDate(t.created_at)} · {formatDuration(t.duration_secs)}
+                            {formatDate(item.created_at)} · {formatDuration(item.duration_secs)}
                         </span>
                     </button>
-                    <button class="delete" onclick={(e) => { e.stopPropagation(); remove(t.id); }}>
+                    {#if !item.summary}
+                        <button
+                            class="summarize"
+                            disabled={!claudeAvailable || summarizingId === item.id}
+                            title={claudeAvailable ? t("summarize") : t("claudeNotAvailable")}
+                            onclick={(e) => { e.stopPropagation(); summarize(item.id); }}
+                        >
+                            {summarizingId === item.id ? t("summarizing") : t("summarize")}
+                        </button>
+                    {/if}
+                    <button class="delete" onclick={(e) => { e.stopPropagation(); remove(item.id); }}>
                         ×
                     </button>
                 </li>
@@ -117,6 +154,38 @@
     .meta {
         font-size: 0.85rem;
         color: var(--text-muted);
+    }
+
+    .summary-badge {
+        display: inline-block;
+        background: var(--primary);
+        color: white;
+        font-size: 0.65rem;
+        font-weight: 700;
+        width: 18px;
+        height: 18px;
+        line-height: 18px;
+        text-align: center;
+        border-radius: 50%;
+        margin-left: 6px;
+        vertical-align: middle;
+    }
+
+    .summarize {
+        background: transparent;
+        color: var(--success);
+        padding: 8px 12px;
+        font-size: 0.8rem;
+        white-space: nowrap;
+    }
+
+    .summarize:hover:not(:disabled) {
+        background: rgba(74, 222, 128, 0.15);
+    }
+
+    .summarize:disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
     }
 
     .delete {

@@ -15,6 +15,10 @@ const translations = {
     loadError: "Falha ao carregar transcrições",
     deleteError: "Falha ao excluir transcrição",
     meetingTitle: "Reunião",
+    summarize: "Resumir",
+    summarizing: "Resumindo...",
+    summary: "Resumo",
+    claudeNotAvailable: "Claude CLI não disponível",
   },
   en: {
     record: "Record",
@@ -32,6 +36,10 @@ const translations = {
     loadError: "Failed to load transcriptions",
     deleteError: "Failed to delete transcription",
     meetingTitle: "Meeting",
+    summarize: "Summarize",
+    summarizing: "Summarizing...",
+    summary: "Summary",
+    claudeNotAvailable: "Claude CLI not available",
   },
 };
 

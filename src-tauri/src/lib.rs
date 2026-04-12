@@ -1,5 +1,6 @@
 mod audio;
 mod db;
+mod summarize;
 mod transcribe;
 
 use std::path::PathBuf;
@@ -9,6 +10,7 @@ use tauri::{Manager, State};
 
 use audio::capture::AudioCapture;
 use db::store::{Store, Transcription};
+use summarize::{build_prompt, call_claude_cli, is_claude_cli_available};
 use transcribe::whisper::Transcriber;
 
 /// Wrapper to allow AudioCapture (which contains cpal::Stream, a !Send type)
@@ -125,6 +127,31 @@ fn delete_transcription(state: State<'_, AppState>, id: i64) -> Result<(), Strin
     store.delete(id)
 }
 
+#[tauri::command]
+fn check_claude_cli() -> bool {
+    is_claude_cli_available()
+}
+
+#[tauri::command]
+async fn summarize_transcription(state: State<'_, AppState>, id: i64) -> Result<String, String> {
+    let text = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        let transcription = store.get(id)?;
+        transcription.text
+    };
+
+    let prompt = build_prompt(&text);
+
+    let summary = tauri::async_runtime::spawn_blocking(move || call_claude_cli(&prompt))
+        .await
+        .map_err(|e| format!("Summary task failed: {}", e))??;
+
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    store.save_summary(id, &summary)?;
+
+    Ok(summary)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -158,6 +185,8 @@ pub fn run() {
             list_transcriptions,
             get_transcription,
             delete_transcription,
+            check_claude_cli,
+            summarize_transcription,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

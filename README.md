@@ -8,12 +8,17 @@ Privacy-first meeting transcriber for Linux. Records microphone and system audio
 |----------|---------|
 | ![Recorder](docs/images/recorder.png) | ![History](docs/images/history.png) |
 
+| Summary |
+|---------|
+| ![Summary](docs/images/summary.png) |
+
 ## Features
 
 - **Dual audio capture** — records microphone + system audio (browser, Zoom, Meet) via PipeWire
 - **Local transcription** — Whisper runs on your machine, no internet needed
 - **Bilingual UI** — Portuguese and English, follows system locale
 - **Transcription history** — browse, view, copy, and delete past transcriptions
+- **AI summary** — summarize transcriptions with key points via Claude Code CLI
 - **Privacy first** — audio files deleted after transcription, data stays in local SQLite
 
 ## Requirements
@@ -77,7 +82,7 @@ Download with: `./scripts/download-model.sh <model>`
 
 ```bash
 cargo tauri dev          # Full app dev mode with hot reload
-cargo test               # Run Rust tests (23 tests)
+cargo test               # Run Rust tests (29 tests)
 npm run check            # Svelte/TypeScript type checking
 cargo fmt                # Format Rust code
 cargo clippy             # Lint Rust code
@@ -94,6 +99,7 @@ src-tauri/src/
 │   └── wav_writer.rs   # Thread-safe WAV writer
 ├── db/
 │   └── store.rs        # SQLite CRUD for transcriptions
+├── summarize.rs        # Claude CLI integration for AI summaries
 └── transcribe/
     └── whisper.rs      # Whisper transcription + WAV loading + resampling
 

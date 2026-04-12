@@ -28,6 +28,11 @@
     <p class="meta">{transcription.created_at} · {transcription.language}</p>
 
     <pre class="transcript">{transcription.text}</pre>
+
+    {#if transcription.summary}
+        <h3 class="summary-heading">{t("summary")}</h3>
+        <pre class="transcript summary">{transcription.summary}</pre>
+    {/if}
 </div>
 
 <style>
@@ -77,5 +82,15 @@
         line-height: 1.6;
         max-height: 60vh;
         overflow-y: auto;
+    }
+
+    .summary-heading {
+        margin-top: 24px;
+        margin-bottom: 8px;
+        color: var(--success);
+    }
+
+    .summary {
+        border-color: var(--success);
     }
 </style>

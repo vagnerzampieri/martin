@@ -10,6 +10,7 @@ pub struct Transcription {
     pub language: String,
     pub duration_secs: f64,
     pub created_at: String,
+    pub summary: Option<String>,
 }
 
 pub struct Store {
@@ -28,7 +29,8 @@ impl Store {
                 text TEXT NOT NULL,
                 language TEXT NOT NULL DEFAULT 'pt',
                 duration_secs REAL NOT NULL DEFAULT 0.0,
-                created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+                created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+                summary TEXT
             );",
         )
         .map_err(|e| format!("Failed to create table: {}", e))?;
@@ -56,7 +58,7 @@ impl Store {
     pub fn list(&self) -> Result<Vec<Transcription>, String> {
         let mut stmt = self
             .conn
-            .prepare("SELECT id, title, text, language, duration_secs, created_at FROM transcriptions ORDER BY created_at DESC")
+            .prepare("SELECT id, title, text, language, duration_secs, created_at, summary FROM transcriptions ORDER BY created_at DESC")
             .map_err(|e| format!("Failed to prepare query: {}", e))?;
 
         let rows = stmt
@@ -68,6 +70,7 @@ impl Store {
                     language: row.get(3)?,
                     duration_secs: row.get(4)?,
                     created_at: row.get(5)?,
+                    summary: row.get(6)?,
                 })
             })
             .map_err(|e| format!("Failed to query: {}", e))?;
@@ -79,7 +82,7 @@ impl Store {
     pub fn get(&self, id: i64) -> Result<Transcription, String> {
         self.conn
             .query_row(
-                "SELECT id, title, text, language, duration_secs, created_at FROM transcriptions WHERE id = ?1",
+                "SELECT id, title, text, language, duration_secs, created_at, summary FROM transcriptions WHERE id = ?1",
                 params![id],
                 |row| {
                     Ok(Transcription {
@@ -89,10 +92,26 @@ impl Store {
                         language: row.get(3)?,
                         duration_secs: row.get(4)?,
                         created_at: row.get(5)?,
+                        summary: row.get(6)?,
                     })
                 },
             )
             .map_err(|e| format!("Transcription not found: {}", e))
+    }
+
+    pub fn save_summary(&self, id: i64, summary: &str) -> Result<(), String> {
+        let affected = self
+            .conn
+            .execute(
+                "UPDATE transcriptions SET summary = ?1 WHERE id = ?2",
+                params![summary, id],
+            )
+            .map_err(|e| format!("Failed to save summary: {}", e))?;
+
+        if affected == 0 {
+            return Err(format!("Transcription with id {} not found", id));
+        }
+        Ok(())
     }
 
     pub fn delete(&self, id: i64) -> Result<(), String> {
@@ -219,6 +238,66 @@ mod tests {
 
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("not found"));
+    }
+
+    #[test]
+    fn get_returns_none_summary_when_not_set() {
+        let (store, _temp_file) = create_temp_store();
+
+        let id = store
+            .save("Meeting", "Hello world", "en", 45.0)
+            .expect("Failed to save");
+
+        let transcription = store.get(id).expect("Failed to get");
+
+        assert!(transcription.summary.is_none());
+    }
+
+    #[test]
+    fn save_summary_persists_and_get_retrieves_it() {
+        let (store, _temp_file) = create_temp_store();
+
+        let id = store
+            .save("Meeting", "Long discussion about project", "en", 120.0)
+            .expect("Failed to save");
+
+        store
+            .save_summary(id, "Summary of the meeting with key points")
+            .expect("Failed to save summary");
+
+        let transcription = store.get(id).expect("Failed to get");
+
+        assert_eq!(
+            transcription.summary,
+            Some("Summary of the meeting with key points".to_string())
+        );
+    }
+
+    #[test]
+    fn save_summary_returns_error_for_nonexistent_id() {
+        let (store, _temp_file) = create_temp_store();
+
+        let result = store.save_summary(999, "some summary");
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not found"));
+    }
+
+    #[test]
+    fn list_includes_summary_field() {
+        let (store, _temp_file) = create_temp_store();
+
+        let id = store.save("Meeting", "text", "en", 10.0).expect("Failed to save");
+        store.save_summary(id, "A summary").expect("Failed to save summary");
+        store.save("No summary", "text 2", "pt", 20.0).expect("Failed to save");
+
+        let records = store.list().expect("Failed to list");
+
+        let with_summary = records.iter().find(|r| r.title == "Meeting").unwrap();
+        let without_summary = records.iter().find(|r| r.title == "No summary").unwrap();
+
+        assert_eq!(with_summary.summary, Some("A summary".to_string()));
+        assert!(without_summary.summary.is_none());
     }
 
     #[test]
