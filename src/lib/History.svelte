@@ -6,19 +6,24 @@
 
     let transcriptions = $state([]);
     let loading = $state(true);
+    let error = $state("");
 
     onMount(async () => {
         try {
             transcriptions = await invoke("list_transcriptions");
         } catch (e) {
-            console.error(e);
+            error = `Falha ao carregar transcricoes: ${e}`;
         }
         loading = false;
     });
 
     async function remove(id) {
-        await invoke("delete_transcription", { id });
-        transcriptions = transcriptions.filter((t) => t.id !== id);
+        try {
+            await invoke("delete_transcription", { id });
+            transcriptions = transcriptions.filter((t) => t.id !== id);
+        } catch (e) {
+            error = `Falha ao excluir transcricao: ${e}`;
+        }
     }
 
     function formatDate(dateStr) {
@@ -34,6 +39,10 @@
 
 <div class="history">
     <h2>Historico</h2>
+
+    {#if error}
+        <div class="error">{error}</div>
+    {/if}
 
     {#if loading}
         <p class="muted">Carregando...</p>
@@ -119,5 +128,13 @@
 
     .delete:hover {
         background: rgba(233, 69, 96, 0.2);
+    }
+
+    .error {
+        color: var(--accent);
+        background: rgba(233, 69, 96, 0.1);
+        padding: 12px 16px;
+        border-radius: var(--radius);
+        margin-bottom: 16px;
     }
 </style>
