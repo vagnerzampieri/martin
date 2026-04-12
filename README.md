@@ -2,6 +2,12 @@
 
 Meeting transcriber for Linux. Record your meetings, transcribe locally with Whisper, keep your data on your machine.
 
+## Screenshots
+
+| Recorder | History |
+|----------|---------|
+| ![Recorder](docs/images/recorder.png) | ![History](docs/images/history.png) |
+
 ## Features
 
 - Record system audio and microphone
@@ -39,9 +45,9 @@ The binary will be in `src-tauri/target/release/martin`.
 ## Usage
 
 1. Open Martin
-2. Click **Iniciar Gravacao** before your meeting
+2. Click **Iniciar Gravação** before your meeting
 3. Have your meeting
-4. Click **Parar Gravacao** when done
+4. Click **Parar Gravação** when done
 5. Click **Transcrever** — wait for local transcription
 6. Done. Text is saved, audio is deleted.
 
