@@ -2,7 +2,19 @@
 
 ## Project
 
-Tauri 2 desktop app — Svelte 5 (SvelteKit) frontend, Rust backend. Captures system audio, transcribes locally with Whisper, stores results in SQLite. Privacy-first: no cloud, no internet required.
+Tauri 2 desktop app — Svelte 5 (SvelteKit) frontend, Rust backend. Captures microphone + system audio (via PipeWire's `pw-record`), transcribes locally with Whisper, stores results in SQLite. Privacy-first: no cloud, no internet required.
+
+### Audio Pipeline
+
+Recording uses two sources mixed into one WAV:
+- **Microphone** — cpal with ALSA backend
+- **System audio** — `pw-record` subprocess targeting default PipeWire sink (resolved via `wpctl inspect`)
+- On stop, both WAVs are mixed (`audio/mix.rs`) and the temp files deleted
+- Falls back to mic-only if PipeWire is unavailable
+
+### i18n
+
+UI strings live in `src/lib/i18n.js` — a plain JS translations object with `pt` and `en`. Locale detected from `navigator.language`. No library, no manual selector.
 
 ## Core Philosophy
 
@@ -71,7 +83,7 @@ Principles:
 
 The framework conventions are the default. Extract abstractions only when complexity demands it:
 
-- **Rust backend** handles system concerns: audio capture, transcription, file I/O, database. Each concern lives in its own module (`audio/`, `db/`, `transcribe/`).
+- **Rust backend** handles system concerns: audio capture, WAV mixing, transcription, file I/O, database. Each concern lives in its own module (`audio/`, `db/`, `transcribe/`).
 - **Svelte frontend** handles presentation: components, user interaction, state display. Keep components focused on one view or behavior.
 - **Tauri commands are the API boundary.** They are the contract between frontend and backend. Keep them stable, well-named, and documented.
 - **State belongs where it is used.** Rust `Mutex<State>` for backend state. Svelte `$state()` for UI state. Don't mirror state across the boundary unnecessarily.
