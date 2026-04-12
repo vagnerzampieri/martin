@@ -107,3 +107,137 @@ impl Store {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::NamedTempFile;
+
+    fn create_temp_store() -> (Store, NamedTempFile) {
+        let temp_file = NamedTempFile::new().expect("Failed to create temp file");
+        let store = Store::new(temp_file.path()).expect("Failed to create store");
+        (store, temp_file)
+    }
+
+    #[test]
+    fn new_creates_table_successfully() {
+        let (_, _temp_file) = create_temp_store();
+    }
+
+    #[test]
+    fn save_inserts_record_and_returns_valid_id() {
+        let (store, _temp_file) = create_temp_store();
+
+        let id = store
+            .save("Meeting Notes", "Some transcription text", "en", 120.5)
+            .expect("Failed to save transcription");
+
+        assert!(id > 0);
+    }
+
+    #[test]
+    fn get_retrieves_saved_record_with_correct_fields() {
+        let (store, _temp_file) = create_temp_store();
+
+        let id = store
+            .save("Meeting Notes", "Hello world", "en", 45.0)
+            .expect("Failed to save");
+
+        let transcription = store.get(id).expect("Failed to get transcription");
+
+        assert_eq!(transcription.id, id);
+        assert_eq!(transcription.title, "Meeting Notes");
+        assert_eq!(transcription.text, "Hello world");
+        assert_eq!(transcription.language, "en");
+        assert_eq!(transcription.duration_secs, 45.0);
+        assert!(!transcription.created_at.is_empty());
+    }
+
+    #[test]
+    fn list_returns_records_ordered_by_created_at_desc() {
+        let (store, _temp_file) = create_temp_store();
+
+        // Insert with explicit timestamps to guarantee ordering
+        store.conn.execute(
+            "INSERT INTO transcriptions (title, text, language, duration_secs, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params!["First", "text 1", "en", 10.0, "2025-01-01 10:00:00"],
+        ).expect("Failed to insert");
+        store.conn.execute(
+            "INSERT INTO transcriptions (title, text, language, duration_secs, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params!["Second", "text 2", "pt", 20.0, "2025-01-01 11:00:00"],
+        ).expect("Failed to insert");
+        store.conn.execute(
+            "INSERT INTO transcriptions (title, text, language, duration_secs, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params!["Third", "text 3", "es", 30.0, "2025-01-01 12:00:00"],
+        ).expect("Failed to insert");
+
+        let records = store.list().expect("Failed to list");
+
+        assert_eq!(records.len(), 3);
+        assert_eq!(records[0].title, "Third");
+        assert_eq!(records[1].title, "Second");
+        assert_eq!(records[2].title, "First");
+    }
+
+    #[test]
+    fn list_returns_empty_vec_when_no_records_exist() {
+        let (store, _temp_file) = create_temp_store();
+
+        let records = store.list().expect("Failed to list");
+
+        assert!(records.is_empty());
+    }
+
+    #[test]
+    fn get_returns_error_for_nonexistent_id() {
+        let (store, _temp_file) = create_temp_store();
+
+        let result = store.get(999);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn delete_removes_the_record() {
+        let (store, _temp_file) = create_temp_store();
+
+        let id = store
+            .save("To Delete", "some text", "en", 5.0)
+            .expect("Failed to save");
+
+        store.delete(id).expect("Failed to delete");
+
+        let result = store.get(id);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn delete_returns_error_for_nonexistent_id() {
+        let (store, _temp_file) = create_temp_store();
+
+        let result = store.delete(999);
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not found"));
+    }
+
+    #[test]
+    fn save_multiple_records_and_list_returns_all() {
+        let (store, _temp_file) = create_temp_store();
+
+        store.save("Alpha", "text a", "en", 10.0).expect("Failed to save");
+        store.save("Beta", "text b", "pt", 20.0).expect("Failed to save");
+        store.save("Gamma", "text c", "es", 30.0).expect("Failed to save");
+        store.save("Delta", "text d", "fr", 40.0).expect("Failed to save");
+
+        let records = store.list().expect("Failed to list");
+
+        assert_eq!(records.len(), 4);
+
+        let titles: Vec<&str> = records.iter().map(|r| r.title.as_str()).collect();
+        assert!(titles.contains(&"Alpha"));
+        assert!(titles.contains(&"Beta"));
+        assert!(titles.contains(&"Gamma"));
+        assert!(titles.contains(&"Delta"));
+    }
+}

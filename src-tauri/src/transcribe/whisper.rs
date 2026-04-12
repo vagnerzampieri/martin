@@ -108,3 +108,155 @@ impl Transcriber {
         output
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    const EPSILON: f32 = 0.001;
+
+    fn assert_f32_eq(a: f32, b: f32) {
+        assert!(
+            (a - b).abs() < EPSILON,
+            "expected {b} but got {a} (diff: {})",
+            (a - b).abs()
+        );
+    }
+
+    fn write_wav(path: &std::path::Path, sample_rate: u32, channels: u16, samples: &[i16]) {
+        let spec = hound::WavSpec {
+            channels,
+            sample_rate,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut writer = hound::WavWriter::create(path, spec).expect("failed to create WAV");
+        for &s in samples {
+            writer.write_sample(s).expect("failed to write sample");
+        }
+        writer.finalize().expect("failed to finalize WAV");
+    }
+
+    // --- resample tests ---
+
+    #[test]
+    fn resample_same_rate_returns_identical_samples() {
+        let samples = vec![0.0, 0.5, 1.0, -1.0, 0.25];
+        let result = Transcriber::resample(&samples, 16000, 16000);
+
+        assert_eq!(result.len(), samples.len());
+        for (a, b) in result.iter().zip(samples.iter()) {
+            assert_f32_eq(*a, *b);
+        }
+    }
+
+    #[test]
+    fn resample_downsample_2_to_1_produces_correct_length() {
+        let samples: Vec<f32> = (0..1000).map(|i| (i as f32) / 1000.0).collect();
+        let result = Transcriber::resample(&samples, 32000, 16000);
+
+        assert_eq!(result.len(), 500);
+    }
+
+    #[test]
+    fn resample_downsample_preserves_values_at_sample_boundaries() {
+        // With 2:1 downsample, output[i] maps to src_idx = i * 2.0
+        // so output[0] = samples[0], output[1] = samples[2], etc.
+        let samples = vec![0.0, 0.1, 0.2, 0.3, 0.4, 0.5];
+        let result = Transcriber::resample(&samples, 32000, 16000);
+
+        assert_f32_eq(result[0], 0.0);
+        assert_f32_eq(result[1], 0.2);
+        assert_f32_eq(result[2], 0.4);
+    }
+
+    #[test]
+    fn resample_upsample_1_to_2_produces_correct_length() {
+        let samples: Vec<f32> = (0..500).map(|i| (i as f32) / 500.0).collect();
+        let result = Transcriber::resample(&samples, 8000, 16000);
+
+        assert_eq!(result.len(), 1000);
+    }
+
+    #[test]
+    fn resample_empty_input_returns_empty_output() {
+        let samples: Vec<f32> = vec![];
+        let result = Transcriber::resample(&samples, 44100, 16000);
+
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn resample_single_sample_input() {
+        let samples = vec![0.75];
+        let result = Transcriber::resample(&samples, 16000, 16000);
+
+        assert_eq!(result.len(), 1);
+        assert_f32_eq(result[0], 0.75);
+    }
+
+    // --- load_wav_as_mono_f32 tests ---
+
+    #[test]
+    fn load_wav_mono_16khz_no_conversion_needed() {
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let path = dir.path().join("mono_16k.wav");
+
+        let raw_samples: Vec<i16> = vec![0, 16383, -16383, 32767, -32768];
+        write_wav(&path, 16000, 1, &raw_samples);
+
+        let result = Transcriber::load_wav_as_mono_f32(&path).expect("failed to load WAV");
+
+        assert_eq!(result.len(), raw_samples.len());
+        for (got, &raw) in result.iter().zip(raw_samples.iter()) {
+            let expected = raw as f32 / i16::MAX as f32;
+            assert_f32_eq(*got, expected);
+        }
+    }
+
+    #[test]
+    fn load_wav_stereo_converts_to_mono_by_averaging() {
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let path = dir.path().join("stereo_16k.wav");
+
+        // Stereo samples are interleaved: [L0, R0, L1, R1, ...]
+        let raw_samples: Vec<i16> = vec![
+            1000, 3000, // frame 0: L=1000, R=3000 -> mono = 2000
+            -2000, 4000, // frame 1: L=-2000, R=4000 -> mono = 1000
+            0, 0,       // frame 2: L=0, R=0 -> mono = 0
+        ];
+        write_wav(&path, 16000, 2, &raw_samples);
+
+        let result = Transcriber::load_wav_as_mono_f32(&path).expect("failed to load WAV");
+
+        assert_eq!(result.len(), 3);
+
+        let max = i16::MAX as f32;
+        assert_f32_eq(result[0], (1000.0 / max + 3000.0 / max) / 2.0);
+        assert_f32_eq(result[1], (-2000.0 / max + 4000.0 / max) / 2.0);
+        assert_f32_eq(result[2], 0.0);
+    }
+
+    #[test]
+    fn load_wav_resamples_from_48khz_to_16khz() {
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let path = dir.path().join("mono_48k.wav");
+
+        // 480 samples at 48kHz = 10ms of audio -> should become 160 samples at 16kHz
+        let raw_samples: Vec<i16> = (0..480).map(|i| (i * 60) as i16).collect();
+        write_wav(&path, 48000, 1, &raw_samples);
+
+        let result = Transcriber::load_wav_as_mono_f32(&path).expect("failed to load WAV");
+
+        assert_eq!(result.len(), 160);
+    }
+
+    #[test]
+    fn load_wav_returns_error_for_nonexistent_file() {
+        let path = PathBuf::from("/tmp/this_file_does_not_exist_at_all.wav");
+        let result = Transcriber::load_wav_as_mono_f32(&path);
+
+        assert!(result.is_err());
+    }
+}
