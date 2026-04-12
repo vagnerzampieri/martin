@@ -60,12 +60,15 @@ impl Transcriber {
         let samples: Vec<f32> = match spec.sample_format {
             hound::SampleFormat::Int => reader
                 .samples::<i16>()
-                .filter_map(|s| s.ok())
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| format!("Failed to decode WAV samples: {}", e))?
+                .into_iter()
                 .map(|s| s as f32 / i16::MAX as f32)
                 .collect(),
-            hound::SampleFormat::Float => {
-                reader.samples::<f32>().filter_map(|s| s.ok()).collect()
-            }
+            hound::SampleFormat::Float => reader
+                .samples::<f32>()
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| format!("Failed to decode WAV samples: {}", e))?,
         };
 
         // Convert to mono if stereo
