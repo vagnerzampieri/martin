@@ -45,10 +45,8 @@ fn start_recording(state: State<'_, AppState>) -> Result<(), String> {
 #[tauri::command]
 fn stop_recording(state: State<'_, AppState>) -> Result<(), String> {
     let mut guard = state.capture.lock().map_err(|e| e.to_string())?;
-    if let Some(mut capture) = guard.0.take() {
-        capture.stop()?;
-    }
-    Ok(())
+    let mut capture = guard.0.take().ok_or("No active recording to stop")?;
+    capture.stop().map(|_| ())
 }
 
 #[tauri::command]
