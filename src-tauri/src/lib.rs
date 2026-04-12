@@ -2,13 +2,14 @@ mod audio;
 mod db;
 mod transcribe;
 
+use std::path::PathBuf;
+use std::sync::Mutex;
+
+use tauri::{Manager, State};
+
 use audio::capture::AudioCapture;
 use db::store::{Store, Transcription};
 use transcribe::whisper::Transcriber;
-
-use std::path::PathBuf;
-use std::sync::Mutex;
-use tauri::{Manager, State};
 
 /// Wrapper to allow AudioCapture (which contains cpal::Stream, a !Send type)
 /// to be stored in Tauri managed state. Access is serialized through a Mutex.
