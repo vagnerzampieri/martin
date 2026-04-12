@@ -1,7 +1,8 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, SampleFormat, Stream, StreamConfig};
 use hound::WavWriter;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use super::wav_writer::AudioWavWriter;
@@ -10,6 +11,7 @@ pub struct AudioCapture {
     output_path: PathBuf,
     streams: Vec<Stream>,
     wav_writer: Option<AudioWavWriter>,
+    write_error: Arc<AtomicBool>,
 }
 
 impl AudioCapture {
@@ -18,6 +20,7 @@ impl AudioCapture {
             output_path,
             streams: Vec::new(),
             wav_writer: None,
+            write_error: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -39,9 +42,10 @@ impl AudioCapture {
         let wav_writer = AudioWavWriter::new(&self.output_path, sample_rate, channels)?;
         let writer_handle = wav_writer.writer_handle();
 
+        let error_flag = self.write_error.clone();
         let stream = match config.sample_format() {
-            SampleFormat::I16 => self.build_stream_i16(&input_device, &config.into(), writer_handle),
-            SampleFormat::F32 => self.build_stream_f32(&input_device, &config.into(), writer_handle),
+            SampleFormat::I16 => self.build_stream_i16(&input_device, &config.into(), writer_handle, error_flag),
+            SampleFormat::F32 => self.build_stream_f32(&input_device, &config.into(), writer_handle, error_flag),
             format => Err(format!("Unsupported sample format: {:?}", format)),
         }?;
 
@@ -57,10 +61,13 @@ impl AudioCapture {
         self.streams.clear();
 
         // Finalize the WAV file
-        if let Some(ref writer) = self.wav_writer {
+        if let Some(writer) = self.wav_writer.take() {
             writer.finalize()?;
         }
-        self.wav_writer = None;
+
+        if self.write_error.load(Ordering::Relaxed) {
+            return Err("Audio recording encountered write errors. The recording may be incomplete or corrupted.".to_string());
+        }
 
         Ok(self.output_path.clone())
     }
@@ -70,15 +77,24 @@ impl AudioCapture {
         device: &Device,
         config: &StreamConfig,
         writer: Arc<Mutex<Option<WavWriter<std::io::BufWriter<std::fs::File>>>>>,
+        error_flag: Arc<AtomicBool>,
     ) -> Result<Stream, String> {
         let stream = device
             .build_input_stream(
                 config,
                 move |data: &[i16], _| {
-                    if let Ok(mut guard) = writer.lock() {
-                        if let Some(ref mut w) = *guard {
-                            for &sample in data {
-                                let _ = w.write_sample(sample);
+                    if error_flag.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    let Ok(mut guard) = writer.lock() else {
+                        error_flag.store(true, Ordering::Relaxed);
+                        return;
+                    };
+                    if let Some(ref mut w) = *guard {
+                        for &sample in data {
+                            if w.write_sample(sample).is_err() {
+                                error_flag.store(true, Ordering::Relaxed);
+                                return;
                             }
                         }
                     }
@@ -96,16 +112,25 @@ impl AudioCapture {
         device: &Device,
         config: &StreamConfig,
         writer: Arc<Mutex<Option<WavWriter<std::io::BufWriter<std::fs::File>>>>>,
+        error_flag: Arc<AtomicBool>,
     ) -> Result<Stream, String> {
         let stream = device
             .build_input_stream(
                 config,
                 move |data: &[f32], _| {
-                    if let Ok(mut guard) = writer.lock() {
-                        if let Some(ref mut w) = *guard {
-                            for &sample in data {
-                                let sample_i16 = (sample * i16::MAX as f32) as i16;
-                                let _ = w.write_sample(sample_i16);
+                    if error_flag.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    let Ok(mut guard) = writer.lock() else {
+                        error_flag.store(true, Ordering::Relaxed);
+                        return;
+                    };
+                    if let Some(ref mut w) = *guard {
+                        for &sample in data {
+                            let sample_i16 = (sample * i16::MAX as f32) as i16;
+                            if w.write_sample(sample_i16).is_err() {
+                                error_flag.store(true, Ordering::Relaxed);
+                                return;
                             }
                         }
                     }
