@@ -17,7 +17,7 @@ impl Transcriber {
     }
 
     pub fn transcribe(&self, audio_path: &Path, language: &str) -> Result<String, String> {
-        let samples = self.load_wav_as_mono_f32(audio_path)?;
+        let samples = Self::load_wav_as_mono_f32(audio_path)?;
 
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
         params.set_language(Some(language));
@@ -47,7 +47,7 @@ impl Transcriber {
         Ok(segments.join("\n").trim().to_string())
     }
 
-    fn load_wav_as_mono_f32(&self, path: &Path) -> Result<Vec<f32>, String> {
+    fn load_wav_as_mono_f32(path: &Path) -> Result<Vec<f32>, String> {
         let mut reader =
             hound::WavReader::open(path).map_err(|e| format!("Failed to open WAV: {}", e))?;
 
