@@ -56,45 +56,52 @@ fn stop_recording(state: State<'_, AppState>) -> Result<(), String> {
     capture.stop().map(|_| ())
 }
 
+fn wav_duration_secs(path: &std::path::Path) -> Result<f64, String> {
+    let reader = hound::WavReader::open(path)
+        .map_err(|e| format!("Failed to read WAV: {}", e))?;
+    let spec = reader.spec();
+    Ok(reader.duration() as f64 / spec.sample_rate as f64)
+}
+
+fn get_or_create_transcriber(
+    cached: Option<Transcriber>,
+    model_path: &std::path::Path,
+) -> Result<Transcriber, String> {
+    match cached {
+        Some(t) => Ok(t),
+        None => Transcriber::new(model_path),
+    }
+}
+
 #[tauri::command]
 async fn transcribe_recording(state: State<'_, AppState>, title: String, language: String) -> Result<Transcription, String> {
     let audio_path = state.audio_path();
-    let model_path = state.model_path.clone();
-
     if !audio_path.exists() {
         return Err("No recording found. Record a meeting first.".to_string());
     }
 
-    // Take the cached transcriber or create a new one
-    let transcriber = state.transcriber.lock().map_err(|e| e.to_string())?.take();
-
-    let audio_path_clone = audio_path.clone();
+    let model_path = state.model_path.clone();
+    let cached = state.transcriber.lock().map_err(|e| e.to_string())?.take();
+    let audio = audio_path.clone();
     let lang = language.clone();
+
     let (text, duration_secs, transcriber) = tauri::async_runtime::spawn_blocking(move || -> Result<(String, f64, Transcriber), String> {
-        let transcriber = match transcriber {
-            Some(t) => t,
-            None => Transcriber::new(&model_path)?,
-        };
-        let text = transcriber.transcribe(&audio_path_clone, &lang)?;
-
-        let reader = hound::WavReader::open(&audio_path_clone)
-            .map_err(|e| format!("Failed to read WAV: {}", e))?;
-        let spec = reader.spec();
-        let duration_secs = reader.duration() as f64 / spec.sample_rate as f64;
-
+        let transcriber = get_or_create_transcriber(cached, &model_path)?;
+        let text = transcriber.transcribe(&audio, &lang)?;
+        let duration_secs = wav_duration_secs(&audio)?;
         Ok((text, duration_secs, transcriber))
     })
     .await
     .map_err(|e| format!("Transcription task failed: {}", e))??;
 
-    // Return the transcriber to the cache for reuse
     *state.transcriber.lock().map_err(|e| e.to_string())? = Some(transcriber);
 
     let store = state.store.lock().map_err(|e| e.to_string())?;
     let id = store.save(&title, &text, &language, duration_secs)?;
 
-    // Delete the audio file after transcription
-    let _ = std::fs::remove_file(&audio_path);
+    if let Err(e) = std::fs::remove_file(&audio_path) {
+        eprintln!("Warning: failed to delete recording file: {}", e);
+    }
 
     store.get(id)
 }
