@@ -108,9 +108,11 @@ impl AudioCapture {
             writer.finalize()?;
         }
 
-        // Stop pw-record
+        // Stop pw-record gracefully (SIGTERM lets it finalize the WAV header)
         if let Some(mut child) = self.pw_record.take() {
-            let _ = child.kill();
+            unsafe {
+                libc::kill(child.id() as i32, libc::SIGTERM);
+            }
             let _ = child.wait();
         }
 
