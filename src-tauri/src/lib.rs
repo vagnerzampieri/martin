@@ -29,11 +29,14 @@ pub struct AppState {
 
 #[tauri::command]
 fn start_recording(state: State<'_, AppState>) -> Result<(), String> {
+    let mut guard = state.capture.lock().map_err(|e| e.to_string())?;
+    if guard.0.is_some() {
+        return Err("Recording already in progress".to_string());
+    }
+
     let audio_path = state.data_dir.join("recording.wav");
     let mut capture = AudioCapture::new(audio_path);
     capture.start()?;
-
-    let mut guard = state.capture.lock().map_err(|e| e.to_string())?;
     guard.0 = Some(capture);
 
     Ok(())
