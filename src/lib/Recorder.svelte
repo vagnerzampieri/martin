@@ -1,5 +1,6 @@
 <script>
     import { invoke } from "@tauri-apps/api/core";
+    import { t } from "./i18n.js";
 
     let { onTranscribed } = $props();
 
@@ -38,7 +39,7 @@
             transcribing = true;
             const now = new Date().toLocaleString("pt-BR");
             const result = await invoke("transcribe_recording", {
-                title: `Reunião ${now}`,
+                title: `${t("meetingTitle")} ${now}`,
                 language: "pt",
             });
             onTranscribed?.(result);
@@ -60,21 +61,21 @@
     {#if recording}
         <div class="status recording">
             <span class="dot"></span>
-            Gravando... {formatTime(elapsed)}
+            {t("recording")} {formatTime(elapsed)}
         </div>
         <button class="btn-stop" onclick={stopRecording}>
-            Parar Gravação
+            {t("stopRecording")}
         </button>
     {:else if transcribing}
         <div class="status processing">
-            Transcrevendo... isso pode levar alguns minutos.
+            {t("transcribing")}
         </div>
     {:else}
         <button class="btn-start" onclick={startRecording}>
-            Iniciar Gravação
+            {t("startRecording")}
         </button>
         <button class="btn-transcribe" onclick={transcribe}>
-            Transcrever
+            {t("transcribe")}
         </button>
     {/if}
 

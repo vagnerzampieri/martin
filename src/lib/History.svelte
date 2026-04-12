@@ -1,6 +1,7 @@
 <script>
     import { invoke } from "@tauri-apps/api/core";
     import { onMount } from "svelte";
+    import { t } from "./i18n.js";
 
     let { onSelect } = $props();
 
@@ -12,7 +13,7 @@
         try {
             transcriptions = await invoke("list_transcriptions");
         } catch (e) {
-            error = `Falha ao carregar transcrições: ${e}`;
+            error = `${t("loadError")}: ${e}`;
         }
         loading = false;
     });
@@ -22,7 +23,7 @@
             await invoke("delete_transcription", { id });
             transcriptions = transcriptions.filter((t) => t.id !== id);
         } catch (e) {
-            error = `Falha ao excluir transcrição: ${e}`;
+            error = `${t("deleteError")}: ${e}`;
         }
     }
 
@@ -38,16 +39,16 @@
 </script>
 
 <div class="history">
-    <h2>Histórico</h2>
+    <h2>{t("history")}</h2>
 
     {#if error}
         <div class="error">{error}</div>
     {/if}
 
     {#if loading}
-        <p class="muted">Carregando...</p>
+        <p class="muted">{t("loading")}</p>
     {:else if transcriptions.length === 0}
-        <p class="muted">Nenhuma transcrição ainda.</p>
+        <p class="muted">{t("noTranscriptions")}</p>
     {:else}
         <ul>
             {#each transcriptions as t}

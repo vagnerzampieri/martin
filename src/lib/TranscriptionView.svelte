@@ -1,4 +1,6 @@
 <script>
+    import { t } from "./i18n.js";
+
     let { transcription, onBack } = $props();
 
     let copied = $state(false);
@@ -16,9 +18,9 @@
 
 <div class="view">
     <div class="header">
-        <button class="btn-back" onclick={onBack}>← Voltar</button>
+        <button class="btn-back" onclick={onBack}>← {t("back")}</button>
         <button class="btn-copy" onclick={copyToClipboard}>
-            {copied ? "Copiado!" : "Copiar texto"}
+            {copied ? t("copied") : t("copyText")}
         </button>
     </div>
 

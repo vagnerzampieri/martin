@@ -1,5 +1,6 @@
 <script>
     import "../styles/global.css";
+    import { t } from "../lib/i18n.js";
     import Recorder from "../lib/Recorder.svelte";
     import History from "../lib/History.svelte";
     import TranscriptionView from "../lib/TranscriptionView.svelte";
@@ -28,10 +29,10 @@
         <h1>Martin</h1>
         <nav>
             <button class:active={currentView === "recorder"} onclick={showRecorder}>
-                Gravar
+                {t("record")}
             </button>
             <button class:active={currentView === "history"} onclick={showHistory}>
-                Histórico
+                {t("history")}
             </button>
         </nav>
     </header>
