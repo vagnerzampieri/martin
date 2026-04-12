@@ -1,11 +1,10 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, SampleFormat, Stream, StreamConfig};
-use hound::WavWriter;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use super::wav_writer::AudioWavWriter;
+use super::wav_writer::{AudioWavWriter, WavWriterHandle};
 
 pub struct AudioCapture {
     output_path: PathBuf,
@@ -77,7 +76,7 @@ impl AudioCapture {
         &self,
         device: &Device,
         config: &StreamConfig,
-        writer: Arc<Mutex<Option<WavWriter<std::io::BufWriter<std::fs::File>>>>>,
+        writer: WavWriterHandle,
         error_flag: Arc<AtomicBool>,
         stream_error_flag: Arc<AtomicBool>,
     ) -> Result<Stream, String> {
@@ -115,7 +114,7 @@ impl AudioCapture {
         &self,
         device: &Device,
         config: &StreamConfig,
-        writer: Arc<Mutex<Option<WavWriter<std::io::BufWriter<std::fs::File>>>>>,
+        writer: WavWriterHandle,
         error_flag: Arc<AtomicBool>,
         stream_error_flag: Arc<AtomicBool>,
     ) -> Result<Stream, String> {

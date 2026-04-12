@@ -2,9 +2,10 @@ use hound::{WavSpec, WavWriter};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+pub type WavWriterHandle = Arc<Mutex<Option<WavWriter<std::io::BufWriter<std::fs::File>>>>>;
+
 pub struct AudioWavWriter {
-    writer: Arc<Mutex<Option<WavWriter<std::io::BufWriter<std::fs::File>>>>>,
-    spec: WavSpec,
+    writer: WavWriterHandle,
 }
 
 impl AudioWavWriter {
@@ -21,16 +22,11 @@ impl AudioWavWriter {
 
         Ok(Self {
             writer: Arc::new(Mutex::new(Some(writer))),
-            spec,
         })
     }
 
-    pub fn writer_handle(&self) -> Arc<Mutex<Option<WavWriter<std::io::BufWriter<std::fs::File>>>>> {
+    pub fn writer_handle(&self) -> WavWriterHandle {
         self.writer.clone()
-    }
-
-    pub fn spec(&self) -> WavSpec {
-        self.spec
     }
 
     pub fn finalize(&self) -> Result<(), String> {
