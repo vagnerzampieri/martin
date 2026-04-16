@@ -31,7 +31,6 @@ pub struct AppState {
     dictation: Mutex<Option<DictationSession>>,
     store: Mutex<Store>,
     transcriber: Mutex<Option<Transcriber>>,
-    model_path: PathBuf,
     data_dir: PathBuf,
 }
 
@@ -94,6 +93,7 @@ fn get_or_create_transcriber(
 #[tauri::command]
 async fn transcribe_recording(
     state: State<'_, AppState>,
+    app_handle: tauri::AppHandle,
     pending_id: i64,
     title: String,
     language: String,
@@ -110,7 +110,14 @@ async fn transcribe_recording(
         return Err("Recording file not found. It may have been deleted.".to_string());
     }
 
-    let model_path = state.model_path.clone();
+    let data_dir = state.data_dir.clone();
+    let app = app_handle.clone();
+    let model_path = tauri::async_runtime::spawn_blocking(move || {
+        model::ensure_model(&data_dir, &app)
+    })
+    .await
+    .map_err(|e| format!("Model check failed: {}", e))??;
+
     let cached = state.transcriber.lock().map_err(|e| e.to_string())?.take();
     let audio = audio_path.clone();
     let lang = language.clone();
@@ -221,6 +228,14 @@ async fn start_dictation(
         }
     }
 
+    let data_dir = state.data_dir.clone();
+    let app = app_handle.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        model::ensure_model(&data_dir, &app)
+    })
+    .await
+    .map_err(|e| format!("Model check failed: {}", e))??;
+
     let mut session = DictationSession::new();
     session.start()?;
 
@@ -231,7 +246,7 @@ async fn start_dictation(
 
     *state.dictation.lock().map_err(|e| e.to_string())? = Some(session);
 
-    let model_path = state.model_path.clone();
+    let model_path = model::model_path(&state.data_dir);
     let cached = state.transcriber.lock().map_err(|e| e.to_string())?.take();
 
     tauri::async_runtime::spawn(async move {
@@ -309,6 +324,25 @@ async fn stop_dictation(
     store.get(id)
 }
 
+#[tauri::command]
+fn check_model_exists(state: State<'_, AppState>) -> bool {
+    model::model_exists(&state.data_dir)
+}
+
+#[tauri::command]
+async fn download_whisper_model(
+    state: State<'_, AppState>,
+    app_handle: tauri::AppHandle,
+) -> Result<(), String> {
+    let data_dir = state.data_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        model::download_model(&data_dir, &app_handle)
+    })
+    .await
+    .map_err(|e| format!("Download task failed: {}", e))??;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -321,7 +355,6 @@ pub fn run() {
             std::fs::create_dir_all(&data_dir).expect("Failed to create data dir");
 
             let db_path = data_dir.join("martin.db");
-            let model_path = data_dir.join("models").join("ggml-small.bin");
 
             let store = Store::new(&db_path).expect("Failed to initialize database");
 
@@ -330,7 +363,6 @@ pub fn run() {
                 dictation: Mutex::new(None),
                 store: Mutex::new(store),
                 transcriber: Mutex::new(None),
-                model_path,
                 data_dir,
             });
 
@@ -349,6 +381,8 @@ pub fn run() {
             delete_pending_recording,
             start_dictation,
             stop_dictation,
+            check_model_exists,
+            download_whisper_model,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
