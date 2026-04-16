@@ -161,7 +161,7 @@
     }
 
     .transcription-heading {
-        color: var(--primary);
+        color: var(--info);
         margin: 0;
     }
 
