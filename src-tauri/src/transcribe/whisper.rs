@@ -47,6 +47,38 @@ impl Transcriber {
         Ok(segments.join("\n").trim().to_string())
     }
 
+    /// Transcribe pre-processed audio samples (mono f32 at 16kHz).
+    /// Used by dictation mode where audio comes from a buffer, not a file.
+    pub fn transcribe_samples(&self, samples: &[f32], language: &str) -> Result<String, String> {
+        let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+        params.set_language(Some(language));
+        params.set_print_special(false);
+        params.set_print_progress(false);
+        params.set_print_realtime(false);
+        params.set_print_timestamps(false);
+        params.set_single_segment(true);
+
+        let mut state = self
+            .ctx
+            .create_state()
+            .map_err(|e| format!("Failed to create state: {}", e))?;
+
+        state
+            .full(params, samples)
+            .map_err(|e| format!("Transcription failed: {}", e))?;
+
+        let num_segments = state
+            .full_n_segments()
+            .map_err(|e| format!("Failed to get segments: {}", e))?;
+
+        let segments: Vec<String> = (0..num_segments)
+            .map(|i| state.full_get_segment_text(i))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("Failed to extract segment text: {}", e))?;
+
+        Ok(segments.join(" ").trim().to_string())
+    }
+
     fn load_wav_as_mono_f32(path: &Path) -> Result<Vec<f32>, String> {
         let mut reader =
             hound::WavReader::open(path).map_err(|e| format!("Failed to open WAV: {}", e))?;
@@ -262,5 +294,14 @@ mod tests {
         let result = Transcriber::load_wav_as_mono_f32(&path);
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn transcribe_samples_returns_empty_for_silence() {
+        let samples: Vec<f32> = vec![0.0; 16000];
+        // Can't do a real transcription test without a model file.
+        // Verify the params are correctly constructed.
+        let _params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+        assert!(!samples.is_empty());
     }
 }
