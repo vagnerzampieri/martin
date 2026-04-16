@@ -9,7 +9,7 @@ use std::sync::Mutex;
 use tauri::{Manager, State};
 
 use audio::capture::{finalize_recording, AudioCapture};
-use db::store::{Store, Transcription};
+use db::store::{PendingRecording, Store, Transcription};
 use summarize::{build_prompt, call_claude_cli, is_claude_cli_available};
 use transcribe::whisper::Transcriber;
 
@@ -31,12 +31,6 @@ pub struct AppState {
     data_dir: PathBuf,
 }
 
-impl AppState {
-    fn audio_path(&self) -> PathBuf {
-        self.data_dir.join("recording.wav")
-    }
-}
-
 #[tauri::command]
 fn start_recording(state: State<'_, AppState>) -> Result<(), String> {
     let mut guard = state.capture.lock().map_err(|e| e.to_string())?;
@@ -44,7 +38,12 @@ fn start_recording(state: State<'_, AppState>) -> Result<(), String> {
         return Err("Recording already in progress".to_string());
     }
 
-    let audio_path = state.audio_path();
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| format!("System clock error: {}", e))?
+        .as_millis();
+    let audio_path = state.data_dir.join(format!("recording_{}.wav", timestamp));
+
     let mut capture = AudioCapture::new(audio_path);
     capture.start()?;
     guard.0 = Some(capture);
@@ -53,17 +52,23 @@ fn start_recording(state: State<'_, AppState>) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn stop_recording(state: State<'_, AppState>) -> Result<(), String> {
+async fn stop_recording(state: State<'_, AppState>) -> Result<PendingRecording, String> {
     let stop_result = {
         let mut guard = state.capture.lock().map_err(|e| e.to_string())?;
         let mut capture = guard.0.take().ok_or("No active recording to stop")?;
         capture.stop_streams()?
     };
 
-    tauri::async_runtime::spawn_blocking(move || finalize_recording(stop_result))
+    let output_path = tauri::async_runtime::spawn_blocking(move || finalize_recording(stop_result))
         .await
-        .map_err(|e| format!("Recording finalization failed: {}", e))?
-        .map(|_| ())
+        .map_err(|e| format!("Recording finalization failed: {}", e))??;
+
+    let duration_secs = wav_duration_secs(&output_path)?;
+    let file_path = output_path.to_string_lossy().to_string();
+
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    let id = store.save_pending(&file_path, duration_secs)?;
+    store.get_pending(id)
 }
 
 fn wav_duration_secs(path: &std::path::Path) -> Result<f64, String> {
@@ -85,12 +90,20 @@ fn get_or_create_transcriber(
 #[tauri::command]
 async fn transcribe_recording(
     state: State<'_, AppState>,
+    pending_id: i64,
     title: String,
     language: String,
 ) -> Result<Transcription, String> {
-    let audio_path = state.audio_path();
+    let pending = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        store.get_pending(pending_id)?
+    };
+
+    let audio_path = std::path::PathBuf::from(&pending.file_path);
     if !audio_path.exists() {
-        return Err("No recording found. Record a meeting first.".to_string());
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        let _ = store.delete_pending(pending_id);
+        return Err("Recording file not found. It may have been deleted.".to_string());
     }
 
     let model_path = state.model_path.clone();
@@ -117,6 +130,8 @@ async fn transcribe_recording(
     if let Err(e) = std::fs::remove_file(&audio_path) {
         eprintln!("Warning: failed to delete recording file: {}", e);
     }
+
+    store.delete_pending(pending_id)?;
 
     store.get(id)
 }
@@ -164,6 +179,28 @@ async fn summarize_transcription(state: State<'_, AppState>, id: i64) -> Result<
     Ok(summary)
 }
 
+#[tauri::command]
+fn list_pending_recordings(state: State<'_, AppState>) -> Result<Vec<PendingRecording>, String> {
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    store.list_pending()
+}
+
+#[tauri::command]
+fn delete_pending_recording(state: State<'_, AppState>, id: i64) -> Result<(), String> {
+    let file_path = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        let pending = store.get_pending(id)?;
+        store.delete_pending(id)?;
+        pending.file_path
+    };
+
+    if let Err(e) = std::fs::remove_file(&file_path) {
+        eprintln!("Warning: failed to delete recording file: {}", e);
+    }
+
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -199,6 +236,8 @@ pub fn run() {
             delete_transcription,
             check_claude_cli,
             summarize_transcription,
+            list_pending_recordings,
+            delete_pending_recording,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
