@@ -13,6 +13,14 @@ pub struct Transcription {
     pub summary: Option<String>,
 }
 
+#[derive(Debug, Serialize, Clone)]
+pub struct PendingRecording {
+    pub id: i64,
+    pub file_path: String,
+    pub duration_secs: f64,
+    pub created_at: String,
+}
+
 pub struct Store {
     conn: Connection,
 }
@@ -34,6 +42,16 @@ impl Store {
             );",
         )
         .map_err(|e| format!("Failed to create table: {}", e))?;
+
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS pending_recordings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_path TEXT NOT NULL,
+                duration_secs REAL NOT NULL DEFAULT 0.0,
+                created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+            );",
+        )
+        .map_err(|e| format!("Failed to create pending_recordings table: {}", e))?;
 
         Ok(Self { conn })
     }
@@ -122,6 +140,69 @@ impl Store {
 
         if affected == 0 {
             return Err(format!("Transcription with id {} not found", id));
+        }
+        Ok(())
+    }
+
+    pub fn save_pending(&self, file_path: &str, duration_secs: f64) -> Result<i64, String> {
+        self.conn
+            .execute(
+                "INSERT INTO pending_recordings (file_path, duration_secs) VALUES (?1, ?2)",
+                params![file_path, duration_secs],
+            )
+            .map_err(|e| format!("Failed to save pending recording: {}", e))?;
+
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn get_pending(&self, id: i64) -> Result<PendingRecording, String> {
+        self.conn
+            .query_row(
+                "SELECT id, file_path, duration_secs, created_at FROM pending_recordings WHERE id = ?1",
+                params![id],
+                |row| {
+                    Ok(PendingRecording {
+                        id: row.get(0)?,
+                        file_path: row.get(1)?,
+                        duration_secs: row.get(2)?,
+                        created_at: row.get(3)?,
+                    })
+                },
+            )
+            .map_err(|e| format!("Pending recording not found: {}", e))
+    }
+
+    pub fn list_pending(&self) -> Result<Vec<PendingRecording>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, file_path, duration_secs, created_at FROM pending_recordings ORDER BY created_at DESC",
+            )
+            .map_err(|e| format!("Failed to prepare query: {}", e))?;
+
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(PendingRecording {
+                    id: row.get(0)?,
+                    file_path: row.get(1)?,
+                    duration_secs: row.get(2)?,
+                    created_at: row.get(3)?,
+                })
+            })
+            .map_err(|e| format!("Failed to query: {}", e))?;
+
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("Failed to read row: {}", e))
+    }
+
+    pub fn delete_pending(&self, id: i64) -> Result<(), String> {
+        let affected = self
+            .conn
+            .execute("DELETE FROM pending_recordings WHERE id = ?1", params![id])
+            .map_err(|e| format!("Failed to delete pending recording: {}", e))?;
+
+        if affected == 0 {
+            return Err(format!("Pending recording with id {} not found", id));
         }
         Ok(())
     }
@@ -332,5 +413,85 @@ mod tests {
         assert!(titles.contains(&"Beta"));
         assert!(titles.contains(&"Gamma"));
         assert!(titles.contains(&"Delta"));
+    }
+
+    #[test]
+    fn save_pending_inserts_and_returns_valid_id() {
+        let (store, _temp_file) = create_temp_store();
+
+        let id = store
+            .save_pending("/tmp/recording_123.wav", 120.5)
+            .expect("Failed to save pending");
+
+        assert!(id > 0);
+    }
+
+    #[test]
+    fn get_pending_retrieves_saved_record() {
+        let (store, _temp_file) = create_temp_store();
+
+        let id = store
+            .save_pending("/tmp/rec.wav", 60.0)
+            .expect("Failed to save");
+
+        let pending = store.get_pending(id).expect("Failed to get");
+
+        assert_eq!(pending.id, id);
+        assert_eq!(pending.file_path, "/tmp/rec.wav");
+        assert_eq!(pending.duration_secs, 60.0);
+        assert!(!pending.created_at.is_empty());
+    }
+
+    #[test]
+    fn list_pending_returns_records_ordered_by_created_at_desc() {
+        let (store, _temp_file) = create_temp_store();
+
+        store.conn.execute(
+            "INSERT INTO pending_recordings (file_path, duration_secs, created_at) VALUES (?1, ?2, ?3)",
+            params!["/tmp/first.wav", 10.0, "2025-01-01 10:00:00"],
+        ).expect("Failed to insert");
+        store.conn.execute(
+            "INSERT INTO pending_recordings (file_path, duration_secs, created_at) VALUES (?1, ?2, ?3)",
+            params!["/tmp/second.wav", 20.0, "2025-01-01 11:00:00"],
+        ).expect("Failed to insert");
+
+        let records = store.list_pending().expect("Failed to list");
+
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].file_path, "/tmp/second.wav");
+        assert_eq!(records[1].file_path, "/tmp/first.wav");
+    }
+
+    #[test]
+    fn list_pending_returns_empty_when_no_records() {
+        let (store, _temp_file) = create_temp_store();
+
+        let records = store.list_pending().expect("Failed to list");
+
+        assert!(records.is_empty());
+    }
+
+    #[test]
+    fn delete_pending_removes_record() {
+        let (store, _temp_file) = create_temp_store();
+
+        let id = store
+            .save_pending("/tmp/rec.wav", 30.0)
+            .expect("Failed to save");
+
+        store.delete_pending(id).expect("Failed to delete");
+
+        let result = store.get_pending(id);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn delete_pending_returns_error_for_nonexistent_id() {
+        let (store, _temp_file) = create_temp_store();
+
+        let result = store.delete_pending(999);
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not found"));
     }
 }
