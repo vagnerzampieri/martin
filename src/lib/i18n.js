@@ -11,6 +11,7 @@ const translations = {
     loading: "Carregando...",
     copyText: "Copiar texto",
     copied: "Copiado!",
+    copyFailed: "Falha ao copiar",
     back: "Voltar",
     loadError: "Falha ao carregar transcrições",
     deleteError: "Falha ao excluir transcrição",
@@ -20,6 +21,9 @@ const translations = {
     summary: "Resumo",
     claudeNotAvailable: "Claude CLI não disponível",
     processingAudio: "Processando áudio...",
+    pendingRecordings: "Gravações pendentes",
+    noPending: "Nenhuma gravação pendente",
+    deleteRecording: "Excluir gravação",
   },
   en: {
     record: "Record",
@@ -33,6 +37,7 @@ const translations = {
     loading: "Loading...",
     copyText: "Copy text",
     copied: "Copied!",
+    copyFailed: "Copy failed",
     back: "Back",
     loadError: "Failed to load transcriptions",
     deleteError: "Failed to delete transcription",
@@ -42,6 +47,9 @@ const translations = {
     summary: "Summary",
     claudeNotAvailable: "Claude CLI not available",
     processingAudio: "Processing audio...",
+    pendingRecordings: "Pending recordings",
+    noPending: "No pending recordings",
+    deleteRecording: "Delete recording",
   },
 };
 

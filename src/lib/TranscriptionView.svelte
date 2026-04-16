@@ -4,14 +4,17 @@
     let { transcription, onBack } = $props();
 
     let copied = $state(false);
+    let copyFailed = $state(false);
 
     async function copyToClipboard() {
         try {
             await navigator.clipboard.writeText(transcription.text);
             copied = true;
+            copyFailed = false;
             setTimeout(() => { copied = false; }, 2000);
         } catch (e) {
-            console.error("Failed to copy to clipboard:", e);
+            copyFailed = true;
+            setTimeout(() => { copyFailed = false; }, 2000);
         }
     }
 </script>
@@ -19,8 +22,8 @@
 <div class="view">
     <div class="header">
         <button class="btn-back" onclick={onBack}>← {t("back")}</button>
-        <button class="btn-copy" onclick={copyToClipboard}>
-            {copied ? t("copied") : t("copyText")}
+        <button class="btn-copy" class:copy-failed={copyFailed} onclick={copyToClipboard}>
+            {copied ? t("copied") : copyFailed ? t("copyFailed") : t("copyText")}
         </button>
     </div>
 
@@ -92,5 +95,10 @@
 
     .summary {
         border-color: var(--success);
+    }
+
+    .copy-failed {
+        border-color: var(--accent);
+        color: var(--accent);
     }
 </style>
