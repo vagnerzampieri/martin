@@ -1,6 +1,7 @@
 mod audio;
 mod db;
 mod dictation;
+mod model;
 mod summarize;
 mod transcribe;
 
