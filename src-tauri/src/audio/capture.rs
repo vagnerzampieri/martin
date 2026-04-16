@@ -31,12 +31,21 @@ pub fn finalize_recording(mut result: StopResult) -> Result<PathBuf, String> {
     }
 
     if result.system_path.exists() {
-        mix_wav_files(&result.mic_path, &result.system_path, &result.output_path)?;
-        if let Err(e) = std::fs::remove_file(&result.mic_path) {
-            eprintln!(
-                "Warning: failed to remove temp mic file {:?}: {}",
-                result.mic_path, e
-            );
+        match mix_wav_files(&result.mic_path, &result.system_path, &result.output_path) {
+            Ok(()) => {
+                if let Err(e) = std::fs::remove_file(&result.mic_path) {
+                    eprintln!(
+                        "Warning: failed to remove temp mic file {:?}: {}",
+                        result.mic_path, e
+                    );
+                }
+            }
+            Err(e) => {
+                // Mix failed (format mismatch, corrupt system audio) — fall back to mic-only
+                eprintln!("Warning: mix failed ({}), using mic-only recording", e);
+                std::fs::rename(&result.mic_path, &result.output_path)
+                    .map_err(|e| format!("Failed to rename mic recording: {}", e))?;
+            }
         }
         if let Err(e) = std::fs::remove_file(&result.system_path) {
             eprintln!(
