@@ -19,13 +19,28 @@ pub struct StopResult {
 /// Safe to call from any thread (all fields are Send).
 pub fn finalize_recording(mut result: StopResult) -> Result<PathBuf, String> {
     if let Some(ref mut child) = result.pw_child {
-        let _ = child.wait();
+        match child.wait() {
+            Ok(status) if !status.success() => {
+                eprintln!(
+                    "Warning: pw-record exited with status: {}",
+                    status
+                );
+            }
+            Err(e) => {
+                eprintln!("Warning: failed to wait for pw-record: {}", e);
+            }
+            _ => {}
+        }
     }
 
     if result.system_path.exists() {
         mix_wav_files(&result.mic_path, &result.system_path, &result.output_path)?;
-        let _ = std::fs::remove_file(&result.mic_path);
-        let _ = std::fs::remove_file(&result.system_path);
+        if let Err(e) = std::fs::remove_file(&result.mic_path) {
+            eprintln!("Warning: failed to remove temp mic file {:?}: {}", result.mic_path, e);
+        }
+        if let Err(e) = std::fs::remove_file(&result.system_path) {
+            eprintln!("Warning: failed to remove temp system file {:?}: {}", result.system_path, e);
+        }
     } else {
         std::fs::rename(&result.mic_path, &result.output_path)
             .map_err(|e| format!("Failed to rename mic recording: {}", e))?;
