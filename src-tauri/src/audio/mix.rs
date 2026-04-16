@@ -13,15 +13,23 @@ pub fn mix_wav_files(
     let mut sys_reader = hound::WavReader::open(system_path)
         .map_err(|e| format!("Failed to open system WAV: {}", e))?;
 
-    let spec = mic_reader.spec();
+    let mic_spec = mic_reader.spec();
+    let sys_spec = sys_reader.spec();
+    if mic_spec.sample_rate != sys_spec.sample_rate || mic_spec.channels != sys_spec.channels {
+        return Err(format!(
+            "Audio format mismatch: mic ({}Hz, {}ch) vs system ({}Hz, {}ch)",
+            mic_spec.sample_rate, mic_spec.channels, sys_spec.sample_rate, sys_spec.channels
+        ));
+    }
+
     let len = (mic_reader.len() as usize).max(sys_reader.len() as usize);
 
     let mut mic_iter = mic_reader.samples::<i16>();
     let mut sys_iter = sys_reader.samples::<i16>();
 
     let out_spec = hound::WavSpec {
-        channels: spec.channels,
-        sample_rate: spec.sample_rate,
+        channels: mic_spec.channels,
+        sample_rate: mic_spec.sample_rate,
         bits_per_sample: 16,
         sample_format: hound::SampleFormat::Int,
     };
@@ -135,5 +143,35 @@ mod tests {
 
         let result = mix_wav_files(&mic, &sys, &out);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn mix_with_mismatched_sample_rates_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let mic = dir.path().join("mic.wav");
+        let sys = dir.path().join("sys.wav");
+        let out = dir.path().join("out.wav");
+
+        write_wav(&mic, 48000, 1, &[1000, 2000]);
+        write_wav(&sys, 16000, 1, &[500, 1000]);
+
+        let result = mix_wav_files(&mic, &sys, &out);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("mismatch"));
+    }
+
+    #[test]
+    fn mix_with_mismatched_channels_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let mic = dir.path().join("mic.wav");
+        let sys = dir.path().join("sys.wav");
+        let out = dir.path().join("out.wav");
+
+        write_wav(&mic, 16000, 1, &[1000, 2000]);
+        write_wav(&sys, 16000, 2, &[500, 1000, 500, 1000]);
+
+        let result = mix_wav_files(&mic, &sys, &out);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("mismatch"));
     }
 }
