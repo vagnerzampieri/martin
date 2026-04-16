@@ -8,7 +8,9 @@ use tauri::Emitter;
 use crate::transcribe::whisper::Transcriber;
 
 const WHISPER_SAMPLE_RATE: u32 = 16000;
-const CHUNK_SECONDS: usize = 10;
+const POLL_INTERVAL_MS: u64 = 500;
+const MIN_SECONDS_TO_TRANSCRIBE: usize = 3;
+const MAX_BUFFER_SECONDS: usize = 120;
 
 pub struct DictationSession {
     stream: Option<Stream>,
@@ -150,8 +152,9 @@ fn convert_to_mono_16k(samples: &[f32], channels: u16, source_rate: u32) -> Vec<
 }
 
 /// Runs the transcription loop on a blocking thread.
-/// Drains the audio buffer every ~10 seconds, converts to mono 16kHz,
-/// transcribes with Whisper, and emits events to the frontend.
+/// Re-transcribes the entire accumulated audio buffer each cycle for
+/// maximum Whisper accuracy. When the buffer exceeds MAX_BUFFER_SECONDS,
+/// commits the current text as a segment and starts a fresh buffer.
 pub fn run_transcription_loop(
     buffer: Arc<Mutex<Vec<f32>>>,
     running: Arc<AtomicBool>,
@@ -161,79 +164,84 @@ pub fn run_transcription_loop(
     channels: u16,
     app_handle: tauri::AppHandle,
 ) -> Vec<String> {
-    let mut all_segments: Vec<String> = Vec::new();
+    let mut committed_segments: Vec<String> = Vec::new();
+    let mut accumulated_raw: Vec<f32> = Vec::new();
+    let mut last_transcribed_len: usize = 0;
 
-    // Calculate how many raw samples we need for CHUNK_SECONDS of audio
-    let raw_chunk_samples = source_rate as usize * channels as usize * CHUNK_SECONDS;
+    let raw_samples_per_second = source_rate as usize * channels as usize;
+    let min_raw_samples = raw_samples_per_second * MIN_SECONDS_TO_TRANSCRIBE;
+    let max_raw_samples = raw_samples_per_second * MAX_BUFFER_SECONDS;
 
     while running.load(Ordering::Acquire) {
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        std::thread::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS));
 
-        let buffered = buffer.lock().map(|b| b.len()).unwrap_or(0);
-        if buffered < raw_chunk_samples {
+        // Drain new samples from the shared buffer
+        if let Ok(mut buf) = buffer.lock() {
+            accumulated_raw.extend(buf.drain(..));
+        }
+
+        // Only transcribe if we have enough new audio since last transcription
+        if accumulated_raw.len() < min_raw_samples || accumulated_raw.len() == last_transcribed_len
+        {
             continue;
         }
 
-        let raw_data = {
-            let mut buf = match buffer.lock() {
-                Ok(b) => b,
-                Err(_) => continue,
-            };
-            let data: Vec<f32> = buf.drain(..).collect();
-            data
-        };
+        // Convert accumulated audio to mono 16kHz and transcribe the whole thing
+        let mono_16k = convert_to_mono_16k(&accumulated_raw, channels, source_rate);
+        last_transcribed_len = accumulated_raw.len();
 
-        // Convert raw samples to mono 16kHz for Whisper
-        let chunk = convert_to_mono_16k(&raw_data, channels, source_rate);
+        match transcriber.transcribe_samples(&mono_16k, language) {
+            Ok(text) => {
+                let text = text.trim().to_string();
+                if !text.is_empty() {
+                    let full_text = if committed_segments.is_empty() {
+                        text.clone()
+                    } else {
+                        format!("{} {}", committed_segments.join(" "), text)
+                    };
+                    let _ = app_handle.emit(
+                        "dictation://segment",
+                        serde_json::json!({
+                            "text": text,
+                            "fullText": full_text,
+                        }),
+                    );
+                }
+            }
+            Err(e) => {
+                eprintln!("Dictation transcription error: {}", e);
+            }
+        }
 
-        process_chunk(
-            transcriber,
-            &chunk,
-            language,
-            &mut all_segments,
-            &app_handle,
-        );
+        // If buffer exceeds max, commit current transcription and start fresh
+        if accumulated_raw.len() > max_raw_samples {
+            let mono_16k = convert_to_mono_16k(&accumulated_raw, channels, source_rate);
+            if let Ok(text) = transcriber.transcribe_samples(&mono_16k, language) {
+                let text = text.trim().to_string();
+                if !text.is_empty() {
+                    committed_segments.push(text);
+                }
+            }
+            accumulated_raw.clear();
+            last_transcribed_len = 0;
+        }
     }
 
-    // Process remaining audio in buffer
-    let remaining_raw = {
-        let mut buf = match buffer.lock() {
-            Ok(b) => b,
-            Err(_) => return all_segments,
-        };
-        let data: Vec<f32> = buf.drain(..).collect();
-        data
-    };
-
-    // Only process if we have at least 1 second of raw audio
-    let min_raw_samples = source_rate as usize * channels as usize;
-    if remaining_raw.len() > min_raw_samples {
-        let chunk = convert_to_mono_16k(&remaining_raw, channels, source_rate);
-        process_chunk(
-            transcriber,
-            &chunk,
-            language,
-            &mut all_segments,
-            &app_handle,
-        );
+    // Final transcription of remaining audio
+    if let Ok(mut buf) = buffer.lock() {
+        accumulated_raw.extend(buf.drain(..));
     }
 
-    all_segments
-}
-
-fn process_chunk(
-    transcriber: &Transcriber,
-    chunk: &[f32],
-    language: &str,
-    all_segments: &mut Vec<String>,
-    app_handle: &tauri::AppHandle,
-) {
-    match transcriber.transcribe_samples(chunk, language) {
-        Ok(text) => {
+    if accumulated_raw.len() > raw_samples_per_second {
+        let mono_16k = convert_to_mono_16k(&accumulated_raw, channels, source_rate);
+        if let Ok(text) = transcriber.transcribe_samples(&mono_16k, language) {
             let text = text.trim().to_string();
             if !text.is_empty() {
-                all_segments.push(text.clone());
-                let full_text = all_segments.join(" ");
+                let full_text = if committed_segments.is_empty() {
+                    text.clone()
+                } else {
+                    format!("{} {}", committed_segments.join(" "), text)
+                };
                 let _ = app_handle.emit(
                     "dictation://segment",
                     serde_json::json!({
@@ -241,10 +249,10 @@ fn process_chunk(
                         "fullText": full_text,
                     }),
                 );
+                committed_segments.push(text);
             }
         }
-        Err(e) => {
-            eprintln!("Dictation transcription error: {}", e);
-        }
     }
+
+    committed_segments
 }
