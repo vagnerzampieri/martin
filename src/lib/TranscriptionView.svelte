@@ -65,16 +65,11 @@
 <div class="view">
     <div class="header">
         <button class="btn-back" onclick={onBack}>← {t("back")}</button>
-        <div class="header-actions">
-            {#if !summaryText && claudeAvailable}
-                <button class="btn-action" onclick={summarize} disabled={summarizing}>
-                    {summarizing ? t("summarizing") : t("summarize")}
-                </button>
-            {/if}
-            <button class="btn-action" class:copy-failed={copyFailed} onclick={copyToClipboard}>
-                {copied ? t("copied") : copyFailed ? t("copyFailed") : t("copyText")}
+        {#if !summaryText && claudeAvailable}
+            <button class="btn-action" onclick={summarize} disabled={summarizing}>
+                {summarizing ? t("summarizing") : t("summarize")}
             </button>
-        </div>
+        {/if}
     </div>
 
     {#if error}
@@ -84,12 +79,18 @@
     <h2>{transcription.title}</h2>
     <p class="meta">{transcription.created_at} · {transcription.language}</p>
 
+    <div class="section-header">
+        <h3 class="transcription-heading">{t("transcription")}</h3>
+        <button class="btn-copy-section" class:copy-failed={copyFailed} onclick={copyToClipboard}>
+            {copied ? t("copied") : copyFailed ? t("copyFailed") : t("copyText")}
+        </button>
+    </div>
     <pre class="transcript">{transcription.text}</pre>
 
     {#if summaryText}
-        <div class="summary-header">
+        <div class="section-header summary-section">
             <h3 class="summary-heading">{t("summary")}</h3>
-            <button class="btn-copy-summary" class:copy-failed={summaryCopyFailed} onclick={copySummary}>
+            <button class="btn-copy-section" class:copy-failed={summaryCopyFailed} onclick={copySummary}>
                 {summaryCopied ? t("copied") : summaryCopyFailed ? t("copyFailed") : t("copyText")}
             </button>
         </div>
@@ -108,11 +109,6 @@
         justify-content: space-between;
         align-items: center;
         margin-bottom: 16px;
-    }
-
-    .header-actions {
-        display: flex;
-        gap: 8px;
     }
 
     .btn-back {
@@ -157,12 +153,20 @@
         overflow-y: auto;
     }
 
-    .summary-header {
+    .section-header {
         display: flex;
         align-items: center;
         justify-content: space-between;
-        margin-top: 24px;
         margin-bottom: 8px;
+    }
+
+    .transcription-heading {
+        color: var(--primary);
+        margin: 0;
+    }
+
+    .summary-section {
+        margin-top: 24px;
     }
 
     .summary-heading {
@@ -170,7 +174,7 @@
         margin: 0;
     }
 
-    .btn-copy-summary {
+    .btn-copy-section {
         background: var(--surface);
         color: var(--text);
         border: 1px solid var(--border);
