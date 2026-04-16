@@ -8,7 +8,7 @@ use std::sync::Mutex;
 
 use tauri::{Manager, State};
 
-use audio::capture::AudioCapture;
+use audio::capture::{finalize_recording, AudioCapture};
 use db::store::{Store, Transcription};
 use summarize::{build_prompt, call_claude_cli, is_claude_cli_available};
 use transcribe::whisper::Transcriber;
@@ -53,15 +53,21 @@ fn start_recording(state: State<'_, AppState>) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn stop_recording(state: State<'_, AppState>) -> Result<(), String> {
-    let mut guard = state.capture.lock().map_err(|e| e.to_string())?;
-    let mut capture = guard.0.take().ok_or("No active recording to stop")?;
-    capture.stop().map(|_| ())
+async fn stop_recording(state: State<'_, AppState>) -> Result<(), String> {
+    let stop_result = {
+        let mut guard = state.capture.lock().map_err(|e| e.to_string())?;
+        let mut capture = guard.0.take().ok_or("No active recording to stop")?;
+        capture.stop_streams()?
+    };
+
+    tauri::async_runtime::spawn_blocking(move || finalize_recording(stop_result))
+        .await
+        .map_err(|e| format!("Recording finalization failed: {}", e))?
+        .map(|_| ())
 }
 
 fn wav_duration_secs(path: &std::path::Path) -> Result<f64, String> {
-    let reader = hound::WavReader::open(path)
-        .map_err(|e| format!("Failed to read WAV: {}", e))?;
+    let reader = hound::WavReader::open(path).map_err(|e| format!("Failed to read WAV: {}", e))?;
     let spec = reader.spec();
     Ok(reader.duration() as f64 / spec.sample_rate as f64)
 }
@@ -77,7 +83,11 @@ fn get_or_create_transcriber(
 }
 
 #[tauri::command]
-async fn transcribe_recording(state: State<'_, AppState>, title: String, language: String) -> Result<Transcription, String> {
+async fn transcribe_recording(
+    state: State<'_, AppState>,
+    title: String,
+    language: String,
+) -> Result<Transcription, String> {
     let audio_path = state.audio_path();
     if !audio_path.exists() {
         return Err("No recording found. Record a meeting first.".to_string());
@@ -88,12 +98,14 @@ async fn transcribe_recording(state: State<'_, AppState>, title: String, languag
     let audio = audio_path.clone();
     let lang = language.clone();
 
-    let (text, duration_secs, transcriber) = tauri::async_runtime::spawn_blocking(move || -> Result<(String, f64, Transcriber), String> {
-        let transcriber = get_or_create_transcriber(cached, &model_path)?;
-        let text = transcriber.transcribe(&audio, &lang)?;
-        let duration_secs = wav_duration_secs(&audio)?;
-        Ok((text, duration_secs, transcriber))
-    })
+    let (text, duration_secs, transcriber) = tauri::async_runtime::spawn_blocking(
+        move || -> Result<(String, f64, Transcriber), String> {
+            let transcriber = get_or_create_transcriber(cached, &model_path)?;
+            let text = transcriber.transcribe(&audio, &lang)?;
+            let duration_secs = wav_duration_secs(&audio)?;
+            Ok((text, duration_secs, transcriber))
+        },
+    )
     .await
     .map_err(|e| format!("Transcription task failed: {}", e))??;
 

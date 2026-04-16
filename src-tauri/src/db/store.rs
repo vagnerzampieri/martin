@@ -287,9 +287,15 @@ mod tests {
     fn list_includes_summary_field() {
         let (store, _temp_file) = create_temp_store();
 
-        let id = store.save("Meeting", "text", "en", 10.0).expect("Failed to save");
-        store.save_summary(id, "A summary").expect("Failed to save summary");
-        store.save("No summary", "text 2", "pt", 20.0).expect("Failed to save");
+        let id = store
+            .save("Meeting", "text", "en", 10.0)
+            .expect("Failed to save");
+        store
+            .save_summary(id, "A summary")
+            .expect("Failed to save summary");
+        store
+            .save("No summary", "text 2", "pt", 20.0)
+            .expect("Failed to save");
 
         let records = store.list().expect("Failed to list");
 
@@ -304,10 +310,18 @@ mod tests {
     fn save_multiple_records_and_list_returns_all() {
         let (store, _temp_file) = create_temp_store();
 
-        store.save("Alpha", "text a", "en", 10.0).expect("Failed to save");
-        store.save("Beta", "text b", "pt", 20.0).expect("Failed to save");
-        store.save("Gamma", "text c", "es", 30.0).expect("Failed to save");
-        store.save("Delta", "text d", "fr", 40.0).expect("Failed to save");
+        store
+            .save("Alpha", "text a", "en", 10.0)
+            .expect("Failed to save");
+        store
+            .save("Beta", "text b", "pt", 20.0)
+            .expect("Failed to save");
+        store
+            .save("Gamma", "text c", "es", 30.0)
+            .expect("Failed to save");
+        store
+            .save("Delta", "text d", "fr", 40.0)
+            .expect("Failed to save");
 
         let records = store.list().expect("Failed to list");
 

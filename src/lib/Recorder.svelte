@@ -5,6 +5,7 @@
     let { onTranscribed } = $props();
 
     let recording = $state(false);
+    let processing = $state(false);
     let transcribing = $state(false);
     let error = $state("");
     let elapsed = $state(0);
@@ -26,10 +27,13 @@
         try {
             clearInterval(timer);
             timer = null;
-            await invoke("stop_recording");
             recording = false;
+            processing = true;
+            await invoke("stop_recording");
         } catch (e) {
             error = e;
+        } finally {
+            processing = false;
         }
     }
 
@@ -66,6 +70,10 @@
         <button class="btn-stop" onclick={stopRecording}>
             {t("stopRecording")}
         </button>
+    {:else if processing}
+        <div class="status processing">
+            {t("processingAudio")}
+        </div>
     {:else if transcribing}
         <div class="status processing">
             {t("transcribing")}

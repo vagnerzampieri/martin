@@ -3,27 +3,21 @@ use std::path::Path;
 /// Mix two WAV files into the destination path.
 /// Both files are read as i16 samples, summed with clamping, and written as i16.
 /// If files have different lengths, the shorter one is zero-padded.
-pub fn mix_wav_files(mic_path: &Path, system_path: &Path, output_path: &Path) -> Result<(), String> {
-    let mut mic_reader = hound::WavReader::open(mic_path)
-        .map_err(|e| format!("Failed to open mic WAV: {}", e))?;
+pub fn mix_wav_files(
+    mic_path: &Path,
+    system_path: &Path,
+    output_path: &Path,
+) -> Result<(), String> {
+    let mut mic_reader =
+        hound::WavReader::open(mic_path).map_err(|e| format!("Failed to open mic WAV: {}", e))?;
     let mut sys_reader = hound::WavReader::open(system_path)
         .map_err(|e| format!("Failed to open system WAV: {}", e))?;
 
     let spec = mic_reader.spec();
+    let len = (mic_reader.len() as usize).max(sys_reader.len() as usize);
 
-    let mic_samples: Vec<i32> = mic_reader
-        .samples::<i16>()
-        .map(|s| s.map(|v| v as i32))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| format!("Failed to read mic samples: {}", e))?;
-
-    let sys_samples: Vec<i32> = sys_reader
-        .samples::<i16>()
-        .map(|s| s.map(|v| v as i32))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| format!("Failed to read system samples: {}", e))?;
-
-    let len = mic_samples.len().max(sys_samples.len());
+    let mut mic_iter = mic_reader.samples::<i16>();
+    let mut sys_iter = sys_reader.samples::<i16>();
 
     let out_spec = hound::WavSpec {
         channels: spec.channels,
@@ -34,9 +28,17 @@ pub fn mix_wav_files(mic_path: &Path, system_path: &Path, output_path: &Path) ->
     let mut writer = hound::WavWriter::create(output_path, out_spec)
         .map_err(|e| format!("Failed to create output WAV: {}", e))?;
 
-    for i in 0..len {
-        let mic = *mic_samples.get(i).unwrap_or(&0);
-        let sys = *sys_samples.get(i).unwrap_or(&0);
+    for _ in 0..len {
+        let mic = mic_iter
+            .next()
+            .map(|r| r.map(|v| v as i32))
+            .unwrap_or(Ok(0))
+            .map_err(|e| format!("Failed to read mic sample: {}", e))?;
+        let sys = sys_iter
+            .next()
+            .map(|r| r.map(|v| v as i32))
+            .unwrap_or(Ok(0))
+            .map_err(|e| format!("Failed to read system sample: {}", e))?;
         let mixed = (mic + sys).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
         writer
             .write_sample(mixed)

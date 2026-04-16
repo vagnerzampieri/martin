@@ -8,6 +8,32 @@ use std::sync::Arc;
 use super::mix::mix_wav_files;
 use super::wav_writer::{AudioWavWriter, WavWriterHandle};
 
+pub struct StopResult {
+    pub mic_path: PathBuf,
+    pub system_path: PathBuf,
+    pub output_path: PathBuf,
+    pub pw_child: Option<Child>,
+}
+
+/// Heavy phase of stopping: waits for pw-record and mixes WAV files.
+/// Safe to call from any thread (all fields are Send).
+pub fn finalize_recording(mut result: StopResult) -> Result<PathBuf, String> {
+    if let Some(ref mut child) = result.pw_child {
+        let _ = child.wait();
+    }
+
+    if result.system_path.exists() {
+        mix_wav_files(&result.mic_path, &result.system_path, &result.output_path)?;
+        let _ = std::fs::remove_file(&result.mic_path);
+        let _ = std::fs::remove_file(&result.system_path);
+    } else {
+        std::fs::rename(&result.mic_path, &result.output_path)
+            .map_err(|e| format!("Failed to rename mic recording: {}", e))?;
+    }
+
+    Ok(result.output_path)
+}
+
 pub struct AudioCapture {
     output_path: PathBuf,
     mic_path: PathBuf,
@@ -56,7 +82,9 @@ impl AudioCapture {
             wav_writer.writer_handle(),
             self.write_error.clone(),
         )?;
-        mic_stream.play().map_err(|e| format!("Failed to play mic stream: {}", e))?;
+        mic_stream
+            .play()
+            .map_err(|e| format!("Failed to play mic stream: {}", e))?;
         self.streams.push(mic_stream);
         self.wav_writer = Some(wav_writer);
 
@@ -101,36 +129,31 @@ impl AudioCapture {
         None
     }
 
-    pub fn stop(&mut self) -> Result<PathBuf, String> {
-        // Stop mic stream
+    /// Fast phase: stops audio streams and signals pw-record to exit.
+    /// Returns a StopResult that can be finalized on a background thread.
+    pub fn stop_streams(&mut self) -> Result<StopResult, String> {
         self.streams.clear();
         if let Some(writer) = self.wav_writer.take() {
             writer.finalize()?;
         }
 
-        // Stop pw-record gracefully (SIGTERM lets it finalize the WAV header)
-        if let Some(mut child) = self.pw_record.take() {
+        // Signal pw-record to stop (non-blocking, just sends SIGTERM)
+        if let Some(ref child) = self.pw_record {
             unsafe {
                 libc::kill(child.id() as i32, libc::SIGTERM);
             }
-            let _ = child.wait();
         }
 
         if self.write_error.load(Ordering::Relaxed) {
             return Err("Audio recording encountered write errors. The recording may be incomplete or corrupted.".to_string());
         }
 
-        // Mix mic + system audio if system WAV exists
-        if self.system_path.exists() {
-            mix_wav_files(&self.mic_path, &self.system_path, &self.output_path)?;
-            let _ = std::fs::remove_file(&self.mic_path);
-            let _ = std::fs::remove_file(&self.system_path);
-        } else {
-            std::fs::rename(&self.mic_path, &self.output_path)
-                .map_err(|e| format!("Failed to rename mic recording: {}", e))?;
-        }
-
-        Ok(self.output_path.clone())
+        Ok(StopResult {
+            mic_path: self.mic_path.clone(),
+            system_path: self.system_path.clone(),
+            output_path: self.output_path.clone(),
+            pw_child: self.pw_record.take(),
+        })
     }
 
     fn build_input_stream(
@@ -199,4 +222,3 @@ impl AudioCapture {
         }
     }
 }
-

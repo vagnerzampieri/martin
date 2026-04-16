@@ -81,7 +81,11 @@ impl Transcriber {
         // Whisper requires 16kHz audio — resample if needed
         const WHISPER_SAMPLE_RATE: u32 = 16000;
         if source_sample_rate != WHISPER_SAMPLE_RATE {
-            Ok(Self::resample(&mono, source_sample_rate, WHISPER_SAMPLE_RATE))
+            Ok(Self::resample(
+                &mono,
+                source_sample_rate,
+                WHISPER_SAMPLE_RATE,
+            ))
         } else {
             Ok(mono)
         }
@@ -224,7 +228,7 @@ mod tests {
         let raw_samples: Vec<i16> = vec![
             1000, 3000, // frame 0: L=1000, R=3000 -> mono = 2000
             -2000, 4000, // frame 1: L=-2000, R=4000 -> mono = 1000
-            0, 0,       // frame 2: L=0, R=0 -> mono = 0
+            0, 0, // frame 2: L=0, R=0 -> mono = 0
         ];
         write_wav(&path, 16000, 2, &raw_samples);
 

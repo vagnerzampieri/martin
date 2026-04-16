@@ -19,6 +19,7 @@ const translations = {
     summarizing: "Resumindo...",
     summary: "Resumo",
     claudeNotAvailable: "Claude CLI não disponível",
+    processingAudio: "Processando áudio...",
   },
   en: {
     record: "Record",
@@ -40,6 +41,7 @@ const translations = {
     summarizing: "Summarizing...",
     summary: "Summary",
     claudeNotAvailable: "Claude CLI not available",
+    processingAudio: "Processing audio...",
   },
 };
 

@@ -32,7 +32,9 @@ impl AudioWavWriter {
     pub fn finalize(&self) -> Result<(), String> {
         let mut guard = self.writer.lock().map_err(|e| e.to_string())?;
         if let Some(writer) = guard.take() {
-            writer.finalize().map_err(|e| format!("Failed to finalize WAV: {}", e))?;
+            writer
+                .finalize()
+                .map_err(|e| format!("Failed to finalize WAV: {}", e))?;
         }
         Ok(())
     }
