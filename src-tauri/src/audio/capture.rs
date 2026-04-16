@@ -114,7 +114,7 @@ impl AudioCapture {
         Ok(())
     }
 
-    fn start_pw_record(path: &PathBuf, sample_rate: u32, channels: u16) -> Option<Child> {
+    fn start_pw_record(path: &std::path::Path, sample_rate: u32, channels: u16) -> Option<Child> {
         let sink_serial = Self::get_default_sink_serial()?;
 
         Command::new("pw-record")
