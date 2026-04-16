@@ -1,5 +1,6 @@
 mod audio;
 mod db;
+mod dictation;
 mod summarize;
 mod transcribe;
 
@@ -10,6 +11,7 @@ use tauri::{Manager, State};
 
 use audio::capture::{finalize_recording, AudioCapture};
 use db::store::{PendingRecording, Store, Transcription};
+use dictation::DictationSession;
 use summarize::{build_prompt, call_claude_cli, is_claude_cli_available};
 use transcribe::whisper::Transcriber;
 
@@ -25,6 +27,7 @@ unsafe impl Sync for SendableCapture {}
 
 pub struct AppState {
     capture: Mutex<SendableCapture>,
+    dictation: Mutex<Option<DictationSession>>,
     store: Mutex<Store>,
     transcriber: Mutex<Option<Transcriber>>,
     model_path: PathBuf,
@@ -204,6 +207,98 @@ fn delete_pending_recording(state: State<'_, AppState>, id: i64) -> Result<(), S
     Ok(())
 }
 
+#[tauri::command]
+async fn start_dictation(
+    state: State<'_, AppState>,
+    app_handle: tauri::AppHandle,
+    language: String,
+) -> Result<(), String> {
+    {
+        let guard = state.dictation.lock().map_err(|e| e.to_string())?;
+        if guard.as_ref().map_or(false, |d| d.is_running()) {
+            return Err("Dictation already in progress".to_string());
+        }
+    }
+
+    let mut session = DictationSession::new();
+    session.start()?;
+
+    let buffer = session.buffer();
+    let running = session.running_flag();
+
+    *state.dictation.lock().map_err(|e| e.to_string())? = Some(session);
+
+    let model_path = state.model_path.clone();
+    let cached = state.transcriber.lock().map_err(|e| e.to_string())?.take();
+
+    tauri::async_runtime::spawn(async move {
+        let handle = app_handle.clone();
+        let result = tauri::async_runtime::spawn_blocking(move || {
+            let transcriber = match get_or_create_transcriber(cached, &model_path) {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("Failed to create transcriber: {}", e);
+                    return (None, Vec::new());
+                }
+            };
+
+            let segments =
+                dictation::run_transcription_loop(buffer, running, &transcriber, &language, handle);
+
+            (Some(transcriber), segments)
+        })
+        .await;
+
+        if let Ok((Some(transcriber), _)) = result {
+            let app_state = app_handle.state::<AppState>();
+            let _ = app_state
+                .transcriber
+                .lock()
+                .map(|mut guard| *guard = Some(transcriber));
+        }
+    });
+
+    Ok(())
+}
+
+#[tauri::command]
+async fn stop_dictation(
+    state: State<'_, AppState>,
+    title: String,
+    full_text: String,
+    language: String,
+    duration_secs: f64,
+) -> Result<Transcription, String> {
+    {
+        let mut guard = state.dictation.lock().map_err(|e| e.to_string())?;
+        if let Some(ref mut session) = *guard {
+            session.stop();
+        } else {
+            return Err("No dictation in progress".to_string());
+        }
+    }
+
+    // Brief wait for transcription thread to process remaining audio
+    tauri::async_runtime::spawn(async {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    })
+    .await
+    .map_err(|e| format!("Wait failed: {}", e))?;
+
+    {
+        let mut guard = state.dictation.lock().map_err(|e| e.to_string())?;
+        *guard = None;
+    }
+
+    if full_text.trim().is_empty() {
+        return Err("No text was transcribed".to_string());
+    }
+
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    let id = store.save(&title, &full_text, &language, duration_secs)?;
+    store.get(id)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -222,6 +317,7 @@ pub fn run() {
 
             app.manage(AppState {
                 capture: Mutex::new(SendableCapture(None)),
+                dictation: Mutex::new(None),
                 store: Mutex::new(store),
                 transcriber: Mutex::new(None),
                 model_path,
@@ -241,6 +337,8 @@ pub fn run() {
             summarize_transcription,
             list_pending_recordings,
             delete_pending_recording,
+            start_dictation,
+            stop_dictation,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
