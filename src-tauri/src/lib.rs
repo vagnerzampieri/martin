@@ -190,13 +190,16 @@ fn delete_pending_recording(state: State<'_, AppState>, id: i64) -> Result<(), S
     let file_path = {
         let store = state.store.lock().map_err(|e| e.to_string())?;
         let pending = store.get_pending(id)?;
-        store.delete_pending(id)?;
         pending.file_path
     };
 
+    // Delete file first, then DB row — avoids orphaned files if DB delete succeeds but file delete fails
     if let Err(e) = std::fs::remove_file(&file_path) {
         eprintln!("Warning: failed to delete recording file: {}", e);
     }
+
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    store.delete_pending(id)?;
 
     Ok(())
 }
