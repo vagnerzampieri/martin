@@ -21,10 +21,7 @@ pub fn finalize_recording(mut result: StopResult) -> Result<PathBuf, String> {
     if let Some(ref mut child) = result.pw_child {
         match child.wait() {
             Ok(status) if !status.success() => {
-                eprintln!(
-                    "Warning: pw-record exited with status: {}",
-                    status
-                );
+                eprintln!("Warning: pw-record exited with status: {}", status);
             }
             Err(e) => {
                 eprintln!("Warning: failed to wait for pw-record: {}", e);
@@ -36,10 +33,16 @@ pub fn finalize_recording(mut result: StopResult) -> Result<PathBuf, String> {
     if result.system_path.exists() {
         mix_wav_files(&result.mic_path, &result.system_path, &result.output_path)?;
         if let Err(e) = std::fs::remove_file(&result.mic_path) {
-            eprintln!("Warning: failed to remove temp mic file {:?}: {}", result.mic_path, e);
+            eprintln!(
+                "Warning: failed to remove temp mic file {:?}: {}",
+                result.mic_path, e
+            );
         }
         if let Err(e) = std::fs::remove_file(&result.system_path) {
-            eprintln!("Warning: failed to remove temp system file {:?}: {}", result.system_path, e);
+            eprintln!(
+                "Warning: failed to remove temp system file {:?}: {}",
+                result.system_path, e
+            );
         }
     } else {
         std::fs::rename(&result.mic_path, &result.output_path)
@@ -159,12 +162,14 @@ impl AudioCapture {
 
         // Signal pw-record to stop (non-blocking, just sends SIGTERM)
         if let Some(ref child) = self.pw_record {
+            // SAFETY: We send SIGTERM to a child process we spawned.
+            // The PID is valid because we hold the Child handle and haven't called wait() yet.
             unsafe {
                 libc::kill(child.id() as i32, libc::SIGTERM);
             }
         }
 
-        if self.write_error.load(Ordering::Relaxed) {
+        if self.write_error.load(Ordering::Acquire) {
             return Err("Audio recording encountered write errors. The recording may be incomplete or corrupted.".to_string());
         }
 
@@ -184,8 +189,9 @@ impl AudioCapture {
         error_flag: Arc<AtomicBool>,
     ) -> Result<Stream, String> {
         let stream_error_flag = error_flag.clone();
-        let err_callback = move |_err: cpal::StreamError| {
-            stream_error_flag.store(true, Ordering::Relaxed);
+        let err_callback = move |err: cpal::StreamError| {
+            eprintln!("Audio stream error: {}", err);
+            stream_error_flag.store(true, Ordering::Release);
         };
 
         match sample_format {
@@ -193,17 +199,17 @@ impl AudioCapture {
                 .build_input_stream(
                     config,
                     move |data: &[i16], _| {
-                        if error_flag.load(Ordering::Relaxed) {
+                        if error_flag.load(Ordering::Acquire) {
                             return;
                         }
                         let Ok(mut guard) = writer.lock() else {
-                            error_flag.store(true, Ordering::Relaxed);
+                            error_flag.store(true, Ordering::Release);
                             return;
                         };
                         if let Some(ref mut w) = *guard {
                             for &sample in data {
                                 if w.write_sample(sample).is_err() {
-                                    error_flag.store(true, Ordering::Relaxed);
+                                    error_flag.store(true, Ordering::Release);
                                     return;
                                 }
                             }
@@ -217,18 +223,18 @@ impl AudioCapture {
                 .build_input_stream(
                     config,
                     move |data: &[f32], _| {
-                        if error_flag.load(Ordering::Relaxed) {
+                        if error_flag.load(Ordering::Acquire) {
                             return;
                         }
                         let Ok(mut guard) = writer.lock() else {
-                            error_flag.store(true, Ordering::Relaxed);
+                            error_flag.store(true, Ordering::Release);
                             return;
                         };
                         if let Some(ref mut w) = *guard {
                             for &sample in data {
                                 let sample_i16 = (sample * i16::MAX as f32) as i16;
                                 if w.write_sample(sample_i16).is_err() {
-                                    error_flag.store(true, Ordering::Relaxed);
+                                    error_flag.store(true, Ordering::Release);
                                     return;
                                 }
                             }
