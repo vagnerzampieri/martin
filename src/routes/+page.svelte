@@ -5,9 +5,31 @@
     import Dictation from "../lib/Dictation.svelte";
     import History from "../lib/History.svelte";
     import TranscriptionView from "../lib/TranscriptionView.svelte";
+    import { invoke } from "@tauri-apps/api/core";
+    import { onMount } from "svelte";
+    import ModelDownload from "../lib/ModelDownload.svelte";
 
     let currentView = $state("recorder");
     let selectedTranscription = $state(null);
+    let modelReady = $state(true);
+    let checkingModel = $state(true);
+
+    onMount(async () => {
+        try {
+            modelReady = await invoke("check_model_exists");
+        } catch {
+            modelReady = false;
+        }
+        checkingModel = false;
+    });
+
+    function onModelDownloaded() {
+        modelReady = true;
+    }
+
+    function onModelError(/** @type {string} */ _err) {
+        // error is displayed inside ModelDownload; nothing to do here
+    }
 
     function showTranscription(transcription) {
         selectedTranscription = transcription;
@@ -31,6 +53,9 @@
 </script>
 
 <main>
+    {#if !checkingModel && !modelReady}
+        <ModelDownload onComplete={onModelDownloaded} onError={onModelError} />
+    {/if}
     <header>
         <h1>martin</h1>
         <nav>
