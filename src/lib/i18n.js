@@ -29,6 +29,11 @@ const translations = {
     startDictation: "Iniciar Ditado",
     stopDictation: "Parar Ditado",
     dictating: "Ditando...",
+    downloadingModel: "Baixando modelo de transcrição...",
+    downloadProgress: "Baixado",
+    downloadError: "Falha no download",
+    downloadRetry: "Tentar novamente",
+    downloadOf: "de",
   },
   en: {
     record: "Record",
@@ -60,6 +65,11 @@ const translations = {
     startDictation: "Start Dictation",
     stopDictation: "Stop Dictation",
     dictating: "Dictating...",
+    downloadingModel: "Downloading transcription model...",
+    downloadProgress: "Downloaded",
+    downloadError: "Download failed",
+    downloadRetry: "Try again",
+    downloadOf: "of",
   },
 };
 
