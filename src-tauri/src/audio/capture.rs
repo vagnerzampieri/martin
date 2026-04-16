@@ -104,7 +104,12 @@ impl AudioCapture {
         self.wav_writer = Some(wav_writer);
 
         // Start pw-record for system audio (best-effort)
-        self.pw_record = Self::start_pw_record(&self.system_path, sample_rate, channels);
+        match Self::start_pw_record(&self.system_path, sample_rate, channels) {
+            Some(child) => self.pw_record = Some(child),
+            None => {
+                eprintln!("Warning: system audio capture unavailable, recording mic only");
+            }
+        }
 
         Ok(())
     }
