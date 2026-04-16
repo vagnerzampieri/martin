@@ -56,7 +56,7 @@ impl Transcriber {
         params.set_print_progress(false);
         params.set_print_realtime(false);
         params.set_print_timestamps(false);
-        params.set_single_segment(true);
+        params.set_no_context(true);
 
         let mut state = self
             .ctx

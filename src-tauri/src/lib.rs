@@ -225,6 +225,8 @@ async fn start_dictation(
 
     let buffer = session.buffer();
     let running = session.running_flag();
+    let source_rate = session.source_rate();
+    let channels = session.channels();
 
     *state.dictation.lock().map_err(|e| e.to_string())? = Some(session);
 
@@ -242,8 +244,15 @@ async fn start_dictation(
                 }
             };
 
-            let segments =
-                dictation::run_transcription_loop(buffer, running, &transcriber, &language, handle);
+            let segments = dictation::run_transcription_loop(
+                buffer,
+                running,
+                &transcriber,
+                &language,
+                source_rate,
+                channels,
+                handle,
+            );
 
             (Some(transcriber), segments)
         })

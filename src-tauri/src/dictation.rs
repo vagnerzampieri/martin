@@ -3,18 +3,19 @@ use cpal::{SampleFormat, Stream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use tauri::Emitter;
+
 use crate::transcribe::whisper::Transcriber;
 
 const WHISPER_SAMPLE_RATE: u32 = 16000;
-const CHUNK_SECONDS: usize = 5;
-const OVERLAP_SECONDS: usize = 1;
-const CHUNK_SAMPLES: usize = WHISPER_SAMPLE_RATE as usize * CHUNK_SECONDS;
-const OVERLAP_SAMPLES: usize = WHISPER_SAMPLE_RATE as usize * OVERLAP_SECONDS;
+const CHUNK_SECONDS: usize = 10;
 
 pub struct DictationSession {
     stream: Option<Stream>,
     audio_buffer: Arc<Mutex<Vec<f32>>>,
     running: Arc<AtomicBool>,
+    source_rate: u32,
+    channels: u16,
 }
 
 // SAFETY: DictationSession contains cpal::Stream which is !Send.
@@ -27,6 +28,8 @@ impl DictationSession {
             stream: None,
             audio_buffer: Arc::new(Mutex::new(Vec::new())),
             running: Arc::new(AtomicBool::new(false)),
+            source_rate: WHISPER_SAMPLE_RATE,
+            channels: 1,
         }
     }
 
@@ -52,19 +55,20 @@ impl DictationSession {
             .default_input_config()
             .map_err(|e| format!("Failed to get input config: {}", e))?;
 
-        let source_rate = config.sample_rate().0;
-        let channels = config.channels();
+        self.source_rate = config.sample_rate().0;
+        self.channels = config.channels();
         let sample_format = config.sample_format();
         let buffer = self.audio_buffer.clone();
 
+        // Callback stores raw f32 samples. Mono conversion + resampling
+        // happens in the transcription loop to keep the callback fast.
         let stream = match sample_format {
             SampleFormat::I16 => device
                 .build_input_stream(
                     &config.into(),
                     move |data: &[i16], _| {
-                        let mono_16k = convert_to_mono_16k_i16(data, channels, source_rate);
                         if let Ok(mut buf) = buffer.lock() {
-                            buf.extend_from_slice(&mono_16k);
+                            buf.extend(data.iter().map(|&s| s as f32 / i16::MAX as f32));
                         }
                     },
                     |err| eprintln!("Dictation stream error: {}", err),
@@ -75,9 +79,8 @@ impl DictationSession {
                 .build_input_stream(
                     &config.into(),
                     move |data: &[f32], _| {
-                        let mono_16k = convert_to_mono_16k_f32(data, channels, source_rate);
                         if let Ok(mut buf) = buffer.lock() {
-                            buf.extend_from_slice(&mono_16k);
+                            buf.extend_from_slice(data);
                         }
                     },
                     |err| eprintln!("Dictation stream error: {}", err),
@@ -96,19 +99,18 @@ impl DictationSession {
         Ok(())
     }
 
+    pub fn source_rate(&self) -> u32 {
+        self.source_rate
+    }
+
+    pub fn channels(&self) -> u16 {
+        self.channels
+    }
+
     pub fn stop(&mut self) {
         self.running.store(false, Ordering::Release);
         self.stream = None;
     }
-}
-
-fn convert_to_mono_16k_i16(data: &[i16], channels: u16, source_rate: u32) -> Vec<f32> {
-    let float_data: Vec<f32> = data.iter().map(|&s| s as f32 / i16::MAX as f32).collect();
-    convert_to_mono_16k(&float_data, channels, source_rate)
-}
-
-fn convert_to_mono_16k_f32(data: &[f32], channels: u16, source_rate: u32) -> Vec<f32> {
-    convert_to_mono_16k(data, channels, source_rate)
 }
 
 fn convert_to_mono_16k(samples: &[f32], channels: u16, source_rate: u32) -> Vec<f32> {
@@ -148,28 +150,31 @@ fn convert_to_mono_16k(samples: &[f32], channels: u16, source_rate: u32) -> Vec<
 }
 
 /// Runs the transcription loop on a blocking thread.
-/// Drains the audio buffer every ~5 seconds, transcribes, and emits events.
+/// Drains the audio buffer every ~10 seconds, converts to mono 16kHz,
+/// transcribes with Whisper, and emits events to the frontend.
 pub fn run_transcription_loop(
     buffer: Arc<Mutex<Vec<f32>>>,
     running: Arc<AtomicBool>,
     transcriber: &Transcriber,
     language: &str,
+    source_rate: u32,
+    channels: u16,
     app_handle: tauri::AppHandle,
 ) -> Vec<String> {
-    use tauri::Emitter;
-
     let mut all_segments: Vec<String> = Vec::new();
-    let mut overlap: Vec<f32> = Vec::new();
+
+    // Calculate how many raw samples we need for CHUNK_SECONDS of audio
+    let raw_chunk_samples = source_rate as usize * channels as usize * CHUNK_SECONDS;
 
     while running.load(Ordering::Acquire) {
         std::thread::sleep(std::time::Duration::from_millis(500));
 
         let buffered = buffer.lock().map(|b| b.len()).unwrap_or(0);
-        if buffered < CHUNK_SAMPLES {
+        if buffered < raw_chunk_samples {
             continue;
         }
 
-        let audio_data = {
+        let raw_data = {
             let mut buf = match buffer.lock() {
                 Ok(b) => b,
                 Err(_) => continue,
@@ -178,37 +183,20 @@ pub fn run_transcription_loop(
             data
         };
 
-        let mut chunk = Vec::with_capacity(overlap.len() + audio_data.len());
-        chunk.extend_from_slice(&overlap);
-        chunk.extend_from_slice(&audio_data);
+        // Convert raw samples to mono 16kHz for Whisper
+        let chunk = convert_to_mono_16k(&raw_data, channels, source_rate);
 
-        if chunk.len() > OVERLAP_SAMPLES {
-            overlap = chunk[chunk.len() - OVERLAP_SAMPLES..].to_vec();
-        }
-
-        match transcriber.transcribe_samples(&chunk, language) {
-            Ok(text) => {
-                let text = text.trim().to_string();
-                if !text.is_empty() {
-                    all_segments.push(text.clone());
-                    let full_text = all_segments.join(" ");
-                    let _ = app_handle.emit(
-                        "dictation://segment",
-                        serde_json::json!({
-                            "text": text,
-                            "fullText": full_text,
-                        }),
-                    );
-                }
-            }
-            Err(e) => {
-                eprintln!("Dictation transcription error: {}", e);
-            }
-        }
+        process_chunk(
+            transcriber,
+            &chunk,
+            language,
+            &mut all_segments,
+            &app_handle,
+        );
     }
 
     // Process remaining audio in buffer
-    let remaining = {
+    let remaining_raw = {
         let mut buf = match buffer.lock() {
             Ok(b) => b,
             Err(_) => return all_segments,
@@ -217,12 +205,31 @@ pub fn run_transcription_loop(
         data
     };
 
-    if remaining.len() > WHISPER_SAMPLE_RATE as usize {
-        let mut chunk = Vec::with_capacity(overlap.len() + remaining.len());
-        chunk.extend_from_slice(&overlap);
-        chunk.extend_from_slice(&remaining);
+    // Only process if we have at least 1 second of raw audio
+    let min_raw_samples = source_rate as usize * channels as usize;
+    if remaining_raw.len() > min_raw_samples {
+        let chunk = convert_to_mono_16k(&remaining_raw, channels, source_rate);
+        process_chunk(
+            transcriber,
+            &chunk,
+            language,
+            &mut all_segments,
+            &app_handle,
+        );
+    }
 
-        if let Ok(text) = transcriber.transcribe_samples(&chunk, language) {
+    all_segments
+}
+
+fn process_chunk(
+    transcriber: &Transcriber,
+    chunk: &[f32],
+    language: &str,
+    all_segments: &mut Vec<String>,
+    app_handle: &tauri::AppHandle,
+) {
+    match transcriber.transcribe_samples(chunk, language) {
+        Ok(text) => {
             let text = text.trim().to_string();
             if !text.is_empty() {
                 all_segments.push(text.clone());
@@ -236,7 +243,8 @@ pub fn run_transcription_loop(
                 );
             }
         }
+        Err(e) => {
+            eprintln!("Dictation transcription error: {}", e);
+        }
     }
-
-    all_segments
 }
