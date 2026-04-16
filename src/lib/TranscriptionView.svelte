@@ -1,10 +1,28 @@
 <script>
+    import { invoke } from "@tauri-apps/api/core";
+    import { onMount } from "svelte";
     import { t } from "./i18n.js";
 
     let { transcription, onBack } = $props();
 
     let copied = $state(false);
     let copyFailed = $state(false);
+    let summaryCopied = $state(false);
+    let summaryCopyFailed = $state(false);
+    let summarizing = $state(false);
+    let localSummary = $state("");
+    let summaryText = $derived(localSummary || transcription.summary || "");
+    let claudeAvailable = $state(false);
+    let error = $state("");
+
+    onMount(async () => {
+        try {
+            claudeAvailable = await invoke("check_claude_cli");
+        } catch (e) {
+            console.error("Failed to check Claude CLI availability:", e);
+            claudeAvailable = false;
+        }
+    });
 
     async function copyToClipboard() {
         try {
@@ -17,24 +35,65 @@
             setTimeout(() => { copyFailed = false; }, 2000);
         }
     }
+
+    async function copySummary() {
+        try {
+            await navigator.clipboard.writeText(summaryText);
+            summaryCopied = true;
+            summaryCopyFailed = false;
+            setTimeout(() => { summaryCopied = false; }, 2000);
+        } catch (e) {
+            summaryCopyFailed = true;
+            setTimeout(() => { summaryCopyFailed = false; }, 2000);
+        }
+    }
+
+    async function summarize() {
+        try {
+            error = "";
+            summarizing = true;
+            const summary = await invoke("summarize_transcription", { id: transcription.id });
+            localSummary = summary;
+        } catch (e) {
+            error = `${t("summarize")}: ${e}`;
+        } finally {
+            summarizing = false;
+        }
+    }
 </script>
 
 <div class="view">
     <div class="header">
         <button class="btn-back" onclick={onBack}>← {t("back")}</button>
-        <button class="btn-copy" class:copy-failed={copyFailed} onclick={copyToClipboard}>
-            {copied ? t("copied") : copyFailed ? t("copyFailed") : t("copyText")}
-        </button>
+        <div class="header-actions">
+            {#if !summaryText && claudeAvailable}
+                <button class="btn-action" onclick={summarize} disabled={summarizing}>
+                    {summarizing ? t("summarizing") : t("summarize")}
+                </button>
+            {/if}
+            <button class="btn-action" class:copy-failed={copyFailed} onclick={copyToClipboard}>
+                {copied ? t("copied") : copyFailed ? t("copyFailed") : t("copyText")}
+            </button>
+        </div>
     </div>
+
+    {#if error}
+        <div class="error">{error}</div>
+    {/if}
 
     <h2>{transcription.title}</h2>
     <p class="meta">{transcription.created_at} · {transcription.language}</p>
 
     <pre class="transcript">{transcription.text}</pre>
 
-    {#if transcription.summary}
-        <h3 class="summary-heading">{t("summary")}</h3>
-        <pre class="transcript summary">{transcription.summary}</pre>
+    {#if summaryText}
+        <div class="summary-header">
+            <h3 class="summary-heading">{t("summary")}</h3>
+            <button class="btn-copy-summary" class:copy-failed={summaryCopyFailed} onclick={copySummary}>
+                {summaryCopied ? t("copied") : summaryCopyFailed ? t("copyFailed") : t("copyText")}
+            </button>
+        </div>
+        <pre class="transcript summary">{summaryText}</pre>
     {/if}
 </div>
 
@@ -47,7 +106,13 @@
     .header {
         display: flex;
         justify-content: space-between;
+        align-items: center;
         margin-bottom: 16px;
+    }
+
+    .header-actions {
+        display: flex;
+        gap: 8px;
     }
 
     .btn-back {
@@ -56,11 +121,16 @@
         padding: 8px 16px;
     }
 
-    .btn-copy {
+    .btn-action {
         background: var(--surface);
         color: var(--text);
         border: 1px solid var(--border);
         padding: 8px 16px;
+    }
+
+    .btn-action:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
     }
 
     h2 {
@@ -87,10 +157,25 @@
         overflow-y: auto;
     }
 
-    .summary-heading {
+    .summary-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
         margin-top: 24px;
         margin-bottom: 8px;
+    }
+
+    .summary-heading {
         color: var(--success);
+        margin: 0;
+    }
+
+    .btn-copy-summary {
+        background: var(--surface);
+        color: var(--text);
+        border: 1px solid var(--border);
+        padding: 4px 12px;
+        font-size: 0.8rem;
     }
 
     .summary {
@@ -100,5 +185,13 @@
     .copy-failed {
         border-color: var(--accent);
         color: var(--accent);
+    }
+
+    .error {
+        color: var(--accent);
+        background: rgba(233, 69, 96, 0.1);
+        padding: 12px 16px;
+        border-radius: var(--radius);
+        margin-bottom: 16px;
     }
 </style>
