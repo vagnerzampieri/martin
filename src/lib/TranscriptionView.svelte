@@ -81,7 +81,7 @@
 
     <div class="section-header">
         <h3 class="transcription-heading">{t("transcription")}</h3>
-        <button class="btn-copy-section" class:copy-failed={copyFailed} onclick={copyToClipboard}>
+        <button class="btn-copy-section" class:copy-success={copied} class:copy-failed={copyFailed} onclick={copyToClipboard}>
             {copied ? t("copied") : copyFailed ? t("copyFailed") : t("copyText")}
         </button>
     </div>
@@ -90,7 +90,7 @@
     {#if summaryText}
         <div class="section-header summary-section">
             <h3 class="summary-heading">{t("summary")}</h3>
-            <button class="btn-copy-section" class:copy-failed={summaryCopyFailed} onclick={copySummary}>
+            <button class="btn-copy-section" class:copy-success={summaryCopied} class:copy-failed={summaryCopyFailed} onclick={copySummary}>
                 {summaryCopied ? t("copied") : summaryCopyFailed ? t("copyFailed") : t("copyText")}
             </button>
         </div>
@@ -184,6 +184,11 @@
 
     .summary {
         border-color: var(--success);
+    }
+
+    .copy-success {
+        border-color: var(--success);
+        color: var(--success);
     }
 
     .copy-failed {
