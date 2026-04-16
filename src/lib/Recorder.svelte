@@ -2,6 +2,7 @@
     import { invoke } from "@tauri-apps/api/core";
     import { onMount, onDestroy } from "svelte";
     import { t, locale } from "./i18n.js";
+    import { formatDate, formatDuration } from "./format.js";
 
     let { onTranscribed } = $props();
 
@@ -86,15 +87,6 @@
         return `${m}:${s}`;
     }
 
-    function formatDuration(secs) {
-        const m = Math.floor(secs / 60);
-        const s = Math.round(secs % 60);
-        return `${m}min ${s}s`;
-    }
-
-    function formatDate(dateStr) {
-        return new Date(dateStr).toLocaleString("pt-BR");
-    }
 </script>
 
 <div class="recorder">

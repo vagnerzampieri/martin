@@ -2,6 +2,7 @@
     import { invoke } from "@tauri-apps/api/core";
     import { onMount } from "svelte";
     import { t } from "./i18n.js";
+    import { formatDate, formatDuration } from "./format.js";
 
     let { onSelect } = $props();
 
@@ -21,7 +22,8 @@
 
         try {
             claudeAvailable = await invoke("check_claude_cli");
-        } catch {
+        } catch (e) {
+            console.error("Failed to check Claude CLI availability:", e);
             claudeAvailable = false;
         }
     });
@@ -49,15 +51,6 @@
         }
     }
 
-    function formatDate(dateStr) {
-        return new Date(dateStr).toLocaleString("pt-BR");
-    }
-
-    function formatDuration(secs) {
-        const m = Math.floor(secs / 60);
-        const s = Math.round(secs % 60);
-        return `${m}min ${s}s`;
-    }
 </script>
 
 <div class="history">
