@@ -25,6 +25,10 @@ const translations = {
     pendingRecordings: "Gravações pendentes",
     noPending: "Nenhuma gravação pendente",
     deleteRecording: "Excluir gravação",
+    dictation: "Ditado",
+    startDictation: "Iniciar Ditado",
+    stopDictation: "Parar Ditado",
+    dictating: "Ditando...",
   },
   en: {
     record: "Record",
@@ -52,6 +56,10 @@ const translations = {
     pendingRecordings: "Pending recordings",
     noPending: "No pending recordings",
     deleteRecording: "Delete recording",
+    dictation: "Dictation",
+    startDictation: "Start Dictation",
+    stopDictation: "Stop Dictation",
+    dictating: "Dictating...",
   },
 };
 

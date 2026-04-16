@@ -2,6 +2,7 @@
     import "../styles/global.css";
     import { t } from "../lib/i18n.js";
     import Recorder from "../lib/Recorder.svelte";
+    import Dictation from "../lib/Dictation.svelte";
     import History from "../lib/History.svelte";
     import TranscriptionView from "../lib/TranscriptionView.svelte";
 
@@ -15,6 +16,11 @@
 
     function showRecorder() {
         currentView = "recorder";
+        selectedTranscription = null;
+    }
+
+    function showDictation() {
+        currentView = "dictation";
         selectedTranscription = null;
     }
 
@@ -35,6 +41,12 @@
                 {t("record")}
             </button>
             <button
+                class:active={currentView === "dictation"}
+                onclick={showDictation}
+            >
+                {t("dictation")}
+            </button>
+            <button
                 class:active={currentView === "history"}
                 onclick={showHistory}
             >
@@ -45,6 +57,8 @@
 
     {#if currentView === "recorder"}
         <Recorder onTranscribed={showTranscription} />
+    {:else if currentView === "dictation"}
+        <Dictation onTranscribed={showTranscription} />
     {:else if currentView === "history"}
         <History onSelect={showTranscription} />
     {:else if currentView === "view" && selectedTranscription}

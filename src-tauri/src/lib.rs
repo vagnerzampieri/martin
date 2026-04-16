@@ -215,7 +215,7 @@ async fn start_dictation(
 ) -> Result<(), String> {
     {
         let guard = state.dictation.lock().map_err(|e| e.to_string())?;
-        if guard.as_ref().map_or(false, |d| d.is_running()) {
+        if guard.as_ref().is_some_and(|d| d.is_running()) {
             return Err("Dictation already in progress".to_string());
         }
     }
