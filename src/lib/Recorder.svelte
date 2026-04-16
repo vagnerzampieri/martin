@@ -1,7 +1,7 @@
 <script>
     import { invoke } from "@tauri-apps/api/core";
     import { onMount, onDestroy } from "svelte";
-    import { t } from "./i18n.js";
+    import { t, locale } from "./i18n.js";
 
     let { onTranscribed } = $props();
 
@@ -60,7 +60,7 @@
             const result = await invoke("transcribe_recording", {
                 pendingId: id,
                 title: `${t("meetingTitle")} ${now}`,
-                language: "pt",
+                language: locale,
             });
             pendingRecordings = pendingRecordings.filter((p) => p.id !== id);
             onTranscribed?.(result);

@@ -59,3 +59,5 @@ const locale = translations[lang] ? lang : "pt";
 export function t(key) {
   return translations[locale][key] || translations.pt[key] || key;
 }
+
+export { locale };
