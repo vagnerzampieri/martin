@@ -21,7 +21,7 @@
         try {
             pendingRecordings = await invoke("list_pending_recordings");
         } catch (e) {
-            console.error("Failed to load pending recordings:", e);
+            error = `${t("loadError")}: ${e}`;
         }
     }
 
