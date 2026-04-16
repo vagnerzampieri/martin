@@ -28,6 +28,7 @@ Two modes: **Record** meetings with dual audio capture (mic + system), or **Dict
 - **Auto-save** — on stop, the full transcription is saved to history with title and duration
 
 ### General
+- **Auto-download model** — Whisper model downloads automatically on first use, with progress bar
 - **Local transcription** — Whisper runs on your machine, no internet needed
 - **Bilingual UI** — Portuguese and English, follows system locale (also used for transcription language)
 - **Transcription history** — browse, view, copy, and delete past transcriptions
@@ -51,12 +52,23 @@ sudo apt install -y libwebkit2gtk-4.1-dev libgtk-3-dev libasound2-dev libpulse-d
 
 ## Install
 
+### From .deb (recommended)
+
+Download the latest `.deb` from [GitHub Releases](https://github.com/vagnerzampieri/martin/releases) and install:
+
 ```bash
-git clone https://github.com/YOUR_USER/martin.git
+sudo apt install ./martin_0.1.0_amd64.deb
+```
+
+On first use, the app automatically downloads the Whisper model (~466MB). Internet required only for this one-time download.
+
+### From source
+
+```bash
+git clone https://github.com/vagnerzampieri/martin.git
 cd martin
 npm install
 cargo install tauri-cli --version "^2"
-./scripts/download-model.sh small
 cargo tauri build
 ```
 
@@ -135,6 +147,7 @@ src-tauri/src/
 ├── db/
 │   └── store.rs        # SQLite CRUD for transcriptions + pending recordings
 ├── dictation.rs        # Real-time mic capture + transcription loop
+├── model.rs            # Auto-download Whisper model with progress events
 ├── summarize.rs        # Claude CLI integration for AI summaries
 └── transcribe/
     └── whisper.rs      # Whisper transcription + WAV loading + resampling
@@ -145,6 +158,7 @@ src/
 │   ├── format.js       # Shared date/duration formatting
 │   ├── Recorder.svelte # Recording controls + pending recordings list
 │   ├── Dictation.svelte # Real-time dictation with live text display
+│   ├── ModelDownload.svelte # Model download progress overlay
 │   ├── History.svelte  # Transcription list
 │   └── TranscriptionView.svelte  # View + copy + summarize
 └── routes/
