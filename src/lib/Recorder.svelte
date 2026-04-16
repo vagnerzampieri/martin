@@ -118,25 +118,30 @@
             <ul>
                 {#each pendingRecordings as pending}
                     <li>
-                        <span class="pending-info">
-                            {t("meetingTitle")} {formatDate(pending.created_at)} · {formatDuration(pending.duration_secs)}
-                        </span>
-                        <div class="pending-actions">
-                            <button
-                                class="btn-transcribe"
-                                disabled={transcribingId === pending.id}
-                                onclick={() => transcribePending(pending.id)}
-                            >
-                                {transcribingId === pending.id ? t("transcribing") : t("transcribe")}
-                            </button>
-                            <button
-                                class="btn-delete"
-                                disabled={transcribingId === pending.id}
-                                onclick={() => deletePending(pending.id)}
-                            >
-                                ×
-                            </button>
+                        <div class="pending-info">
+                            <span class="pending-date">{formatDate(pending.created_at)}</span>
+                            <span class="pending-duration">{formatDuration(pending.duration_secs)}</span>
                         </div>
+                        {#if transcribingId === pending.id}
+                            <div class="pending-transcribing">
+                                {t("transcribing")}
+                            </div>
+                        {:else}
+                            <div class="pending-actions">
+                                <button
+                                    class="btn-transcribe"
+                                    onclick={() => transcribePending(pending.id)}
+                                >
+                                    {t("transcribe")}
+                                </button>
+                                <button
+                                    class="btn-delete"
+                                    onclick={() => deletePending(pending.id)}
+                                >
+                                    ×
+                                </button>
+                            </div>
+                        {/if}
                     </li>
                 {/each}
             </ul>
@@ -225,11 +230,30 @@
         padding: 10px 12px;
         margin-bottom: 6px;
         background: var(--surface);
+        gap: 12px;
     }
 
     .pending-info {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        min-width: 0;
+    }
+
+    .pending-date {
         font-size: 0.9rem;
         color: var(--text);
+    }
+
+    .pending-duration {
+        font-size: 0.8rem;
+        color: var(--text-muted);
+    }
+
+    .pending-transcribing {
+        font-size: 0.8rem;
+        color: var(--text-muted);
+        white-space: nowrap;
     }
 
     .pending-actions {
@@ -243,11 +267,7 @@
         color: #1a1a2e;
         font-size: 0.8rem;
         padding: 6px 14px;
-    }
-
-    .pending-actions .btn-transcribe:disabled {
-        opacity: 0.5;
-        cursor: not-allowed;
+        white-space: nowrap;
     }
 
     .pending-actions .btn-delete {
@@ -259,10 +279,5 @@
 
     .pending-actions .btn-delete:hover {
         background: rgba(233, 69, 96, 0.2);
-    }
-
-    .pending-actions .btn-delete:disabled {
-        opacity: 0.5;
-        cursor: not-allowed;
     }
 </style>
