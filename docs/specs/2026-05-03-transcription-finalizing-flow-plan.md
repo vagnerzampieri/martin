@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust (whisper-rs callbacks, rusqlite), Tauri 2 events, Svelte 5 runes, no new deps.
 
-**Branch:** `feat/finalizing-flow` — already created. All work commits here. The release tag will be `v0.2.0` (IPC commands change; see Task 28).
+**Branch:** `feat/finalizing-flow` — already created. All work commits here. The release tag will be `v0.2.0` (IPC commands change; see Tasks 12–14).
 
 **Spec:** `docs/specs/2026-05-03-transcription-finalizing-flow-design.md`
 
@@ -18,33 +18,35 @@
 
 | Path | Action | Responsibility |
 |---|---|---|
-| `src-tauri/src/db/store.rs` | modify | Schema migration, new persistence methods, `Transcription.status` |
-| `src-tauri/src/transcribe/job.rs` | create | `TranscriptionJob`, `JobKind`, `run_finalize` worker |
+| `src-tauri/src/db/store.rs` | modify | Schema migration, WAL pragma, `insert_partial`/`update_text`/`mark_complete`/`delete_empty_partials`, `Transcription.status` |
+| `src-tauri/src/transcribe/job.rs` | create | `TranscriptionJob`, `JobKind`, `FinalizeOutcome`, `run_finalize_*`, `finish_job`, `ErrorPayload` |
 | `src-tauri/src/transcribe/mod.rs` | modify | Export `job` module |
-| `src-tauri/src/transcribe/whisper.rs` | modify | New `transcribe_with_callbacks` |
-| `src-tauri/src/dictation.rs` | modify | Stop produces committed text + remaining samples; loop no longer tied to events |
-| `src-tauri/src/lib.rs` | modify | New commands, `current_job` in `AppState`, remove old `transcribe_recording` |
+| `src-tauri/src/transcribe/whisper.rs` | modify | New `transcribe_with_callbacks`, expose `load_wav_as_mono_f32` and `wav_duration_secs` |
+| `src-tauri/src/dictation.rs` | modify | `JoinHandle` on session, last_full_text accessor, `stop_and_join` |
+| `src-tauri/src/lib.rs` | modify | New commands (`stop_dictation` rewritten, `transcribe_pending_recording`, `cancel_job`), `current_job` in `AppState`, remove `transcribe_recording`, `try_state` instead of `state` in workers |
 | `src-tauri/Cargo.toml` | modify | Version bump |
 | `src/lib/appBusy.js` | create | Tiny boolean store for nav lock |
-| `src/lib/FinalizingProgress.svelte` | create | Shared finalizing UI with circular progress |
+| `src/lib/FinalizingProgress.svelte` | create | Shared finalizing UI: ring, indeterminate state, jobLabel, accessible cancel modal |
 | `src/lib/Dictation.svelte` | modify | State machine + new event protocol |
 | `src/lib/Recorder.svelte` | modify | Reroute `transcribePending` to new flow |
-| `src/lib/History.svelte` | modify | "Parcial" badge for non-complete rows |
-| `src/lib/i18n.js` | modify | New strings |
-| `src/routes/+page.svelte` | modify | Bind nav buttons to `appBusy` |
+| `src/lib/History.svelte` | modify | "Parcial" badge for partial rows |
+| `src/lib/i18n.js` | modify | New strings (no `keepPartial`/`discardPartial`) |
+| `src/routes/+page.svelte` | modify | `aria-disabled` on Record + Dictate; History remains free |
 | `src-tauri/tauri.conf.json` | modify | Version bump |
 | `package.json` | modify | Version bump |
 
 ---
 
-### Task 1: Add `status` column to `transcriptions` (idempotent migration)
+### Task 1: Add `status` column to `transcriptions` (idempotent migration) + enable WAL
 
 **Files:**
 - Modify: `src-tauri/src/db/store.rs`
 
-- [ ] **Step 1: Write a test for the migration being idempotent**
+Status vocabulary is `'complete'` and `'partial'` (no `'failed'` — review found it was reserved but never written).
 
-Add to the `tests` module in `src-tauri/src/db/store.rs`:
+- [ ] **Step 1: Write tests for the migration**
+
+Two tests: idempotent re-open (covers re-running the migration on a DB that already has the column) and real-upgrade (covers the v0.1.0 → v0.2.0 path on a populated table).
 
 ```rust
 #[test]
@@ -70,20 +72,66 @@ fn new_runs_migration_idempotently() {
         .expect("query");
     assert_eq!(row, "complete");
 }
+
+#[test]
+fn migration_backfills_existing_rows_with_complete_status() {
+    // Simulate a v0.1.0 database: create the schema by hand WITHOUT the
+    // `status` column, insert rows, then open via Store::new (which runs
+    // the migration). All existing rows must end up with `status='complete'`.
+    let temp_file = NamedTempFile::new().expect("temp file");
+    let path = temp_file.path().to_path_buf();
+
+    {
+        let conn = rusqlite::Connection::open(&path).expect("open raw");
+        conn.execute(
+            "CREATE TABLE transcriptions (
+                id INTEGER PRIMARY KEY,
+                title TEXT NOT NULL,
+                text TEXT NOT NULL,
+                language TEXT NOT NULL,
+                duration_secs REAL NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                summary TEXT
+            )",
+            [],
+        )
+        .expect("create v0.1.0 schema");
+        conn.execute(
+            "INSERT INTO transcriptions (title, text, language, duration_secs) VALUES ('old1', 'a', 'pt', 1.0), ('old2', 'b', 'en', 2.0)",
+            [],
+        )
+        .expect("seed");
+    }
+
+    let store = Store::new(&path).expect("upgrade open");
+    let rows = store.list().expect("list");
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|r| r.status == "complete"));
+}
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cd src-tauri && cargo test --lib db::store::tests::new_runs_migration_idempotently`
-Expected: FAIL — no `status` column exists in the schema yet.
+Run: `cd src-tauri && cargo test --lib db::store::tests::new_runs_migration_idempotently db::store::tests::migration_backfills_existing_rows_with_complete_status`
+Expected: FAIL.
 
-- [ ] **Step 3: Add the migration logic to `Store::new`**
+- [ ] **Step 3: Add the migration + enable WAL in `Store::new`**
 
-Find the `Store::new` function in `src-tauri/src/db/store.rs` and add the migration after the existing `CREATE TABLE` calls, before `Ok(Self { conn })`:
+Find the `Store::new` function in `src-tauri/src/db/store.rs`. Right after `Connection::open(...)`, set pragmas — WAL keeps readers from blocking writers, and `synchronous=NORMAL` matches WAL's durability without per-write fsync (per-segment writes during whisper finalize are otherwise an I/O bottleneck — see Task 8).
+
+```rust
+conn.pragma_update(None, "journal_mode", "WAL")
+    .map_err(|e| format!("Failed to set WAL mode: {}", e))?;
+conn.pragma_update(None, "synchronous", "NORMAL")
+    .map_err(|e| format!("Failed to set synchronous mode: {}", e))?;
+```
+
+Then, after the existing `CREATE TABLE` calls and before `Ok(Self { conn })`, add the migration:
 
 ```rust
 // Migration: add `status` column if missing. Idempotent — older databases
-// (created before this column existed) gain it on next launch.
+// (created before this column existed) gain it on next launch with
+// existing rows backfilled to 'complete' via the column DEFAULT.
 let migration_result = conn.execute(
     "ALTER TABLE transcriptions ADD COLUMN status TEXT NOT NULL DEFAULT 'complete'",
     [],
@@ -96,12 +144,14 @@ match migration_result {
 }
 ```
 
-- [ ] **Step 4: Run the test to verify it passes**
+Note: SQLite does not support adding a CHECK constraint via ALTER TABLE, so the column accepts any string. The code only writes `'complete'` and `'partial'`; future tightening would require a table rebuild and is deferred.
 
-Run: `cd src-tauri && cargo test --lib db::store::tests::new_runs_migration_idempotently`
+- [ ] **Step 4: Run the tests to verify they pass**
+
+Run: `cd src-tauri && cargo test --lib db::store::tests::new_runs_migration db::store::tests::migration_backfills`
 Expected: PASS.
 
-- [ ] **Step 5: Run the full test suite — nothing else should break**
+- [ ] **Step 5: Run the full test suite**
 
 Run: `cd src-tauri && cargo test --lib`
 Expected: all existing tests still pass.
@@ -110,7 +160,7 @@ Expected: all existing tests still pass.
 
 ```bash
 git add src-tauri/src/db/store.rs
-git commit -m "feat(db): add status column to transcriptions with idempotent migration"
+git commit -m "feat(db): add status column with idempotent migration and enable WAL"
 ```
 
 ---
@@ -400,100 +450,83 @@ git commit -m "feat(db): add update_text and mark_complete for incremental persi
 
 ---
 
-### Task 5: Add `Store::reset_partial_on_startup`
+### Task 5: Add `Store::delete_empty_partials` (startup sweep)
 
 **Files:**
 - Modify: `src-tauri/src/db/store.rs`
 - Modify: `src-tauri/src/lib.rs`
 
-- [ ] **Step 1: Write the test**
+The earlier draft of this task added a generic `reset_partial_on_startup` that normalised any non-`complete`/`failed`/`partial` rows. Review found this was speculative — the code never produces a third status, so the function had no real callers. The `'failed'` value is also dropped from the schema vocabulary for the same reason (the Error arm of `finish_job` leaves the row at `'partial'`).
 
-Append to tests:
+What we DO need: when the app is force-killed between `insert_partial` and the first segment callback, History gets a row with `text=''` and `duration_secs=0.0` named "Dictation 03/05/2026 14:32:11" — visually indistinguishable from a real transcription. Sweep those on startup.
+
+- [ ] **Step 1: Write the test**
 
 ```rust
 #[test]
-fn reset_partial_on_startup_only_touches_non_complete() {
+fn delete_empty_partials_removes_only_empty_partials() {
     let (store, _temp_file) = create_temp_store();
 
-    // Insert one complete and one partial, plus one with a bogus status.
-    let complete_id = store.save("c", "x", "pt", 1.0).expect("save");
-    let partial_id = store.insert_partial("p", "pt").expect("partial");
-    store
-        .conn
-        .execute(
-            "INSERT INTO transcriptions (title, text, language, duration_secs, status) VALUES ('weird', '', 'pt', 0.0, 'in_progress')",
-            [],
-        )
-        .expect("insert weird");
+    let kept_complete = store.save("c", "x", "pt", 1.0).expect("save");
+    let kept_partial_with_text = store.insert_partial("p1", "pt").expect("insert");
+    store.update_text(kept_partial_with_text, "some text", 5.0).expect("update");
+    let removed_id = store.insert_partial("ghost", "pt").expect("insert");
 
-    let touched = store.reset_partial_on_startup().expect("reset");
-    assert_eq!(touched, 1, "only the in_progress row should be normalised");
+    let removed = store.delete_empty_partials().expect("sweep");
+    assert_eq!(removed, 1, "only the empty partial should be deleted");
 
-    assert_eq!(store.get(complete_id).unwrap().status, "complete");
-    assert_eq!(store.get(partial_id).unwrap().status, "partial");
-    let weird: String = store
-        .conn
-        .query_row(
-            "SELECT status FROM transcriptions WHERE title = 'weird'",
-            [],
-            |r| r.get(0),
-        )
-        .expect("query");
-    assert_eq!(weird, "partial");
+    assert!(store.get(kept_complete).is_ok());
+    assert!(store.get(kept_partial_with_text).is_ok());
+    assert!(store.get(removed_id).is_err());
 }
 ```
 
 - [ ] **Step 2: Run to verify it fails**
 
-Run: `cd src-tauri && cargo test --lib db::store::tests::reset_partial_on_startup_only_touches_non_complete`
+Run: `cd src-tauri && cargo test --lib db::store::tests::delete_empty_partials`
 Expected: FAIL.
 
 - [ ] **Step 3: Implement the method**
 
-Add to `impl Store`:
-
 ```rust
-/// Normalises any non-`complete`, non-`failed` rows to `partial`.
-/// Called on startup to recover from crashes mid-job.
-/// Returns the number of rows touched.
-pub fn reset_partial_on_startup(&self) -> Result<usize, String> {
+/// Removes partial rows that have no text and no duration — these can only
+/// come from a force-kill that happened before the first segment callback
+/// fired. Returns the number of rows deleted.
+pub fn delete_empty_partials(&self) -> Result<usize, String> {
     let affected = self
         .conn
         .execute(
-            "UPDATE transcriptions SET status = 'partial' WHERE status NOT IN ('complete', 'failed', 'partial')",
+            "DELETE FROM transcriptions WHERE status = 'partial' AND text = '' AND duration_secs = 0.0",
             [],
         )
-        .map_err(|e| format!("Failed to reset partial: {}", e))?;
+        .map_err(|e| format!("Failed to sweep empty partials: {}", e))?;
     Ok(affected)
 }
 ```
 
-- [ ] **Step 4: Wire it into app startup**
+- [ ] **Step 4: Wire into app startup**
 
-In `src-tauri/src/lib.rs`, find the `setup` block (around line 350 — `let data_dir = app...app_data_dir()...`). After `let store = Store::new(&db_path).expect(...)`, add:
+In `src-tauri/src/lib.rs`'s setup closure, after `Store::new`:
 
 ```rust
-let recovered = store
-    .reset_partial_on_startup()
-    .expect("Failed to reset partial transcriptions on startup");
-if recovered > 0 {
-    eprintln!("[startup] reset {} stale transcription(s) to status='partial'", recovered);
+let swept = store
+    .delete_empty_partials()
+    .expect("Failed to sweep empty partials on startup");
+if swept > 0 {
+    eprintln!("[startup] swept {} empty partial transcription(s)", swept);
 }
 ```
 
-- [ ] **Step 5: Run all tests + a manual smoke**
+- [ ] **Step 5: Run all tests**
 
 Run: `cd src-tauri && cargo test --lib db::store`
 Expected: all pass.
-
-Run: `cd src-tauri && cargo check`
-Expected: compiles cleanly.
 
 - [ ] **Step 6: Commit**
 
 ```bash
 git add src-tauri/src/db/store.rs src-tauri/src/lib.rs
-git commit -m "feat(db): reset stale partial transcriptions on startup"
+git commit -m "feat(db): sweep empty partial transcriptions on startup"
 ```
 
 ---
@@ -505,9 +538,13 @@ git commit -m "feat(db): reset stale partial transcriptions on startup"
 
 This wraps `state.full` with progress, segment, and abort callbacks routed back to caller-supplied closures. Used by both job kinds.
 
-- [ ] **Step 1: Read the whisper-rs FullParams API in the existing source**
+- [ ] **Step 1: Verify the whisper-rs FullParams callback API**
 
-Read `src-tauri/src/transcribe/whisper.rs:30-45` (existing `transcribe` function). Confirm `FullParams` has `set_progress_callback_safe`, `set_segment_callback_safe_lossy`, and `set_abort_callback_safe`. (whisper-rs 0.14.) If your version exposes only `_unsafe` variants, prefer the `_safe` ones. The patterns here use the `_safe` variants.
+The existing `transcribe` in `whisper.rs` does not use callbacks, so you cannot confirm the API there. Instead verify against the docs for the version pinned in `Cargo.lock`:
+
+Run: `cd src-tauri && cargo doc --no-deps -p whisper-rs --open` (or browse `https://docs.rs/whisper-rs/<version>/whisper_rs/struct.FullParams.html`).
+
+Confirm `FullParams` exposes `set_progress_callback_safe(FnMut(i32) + Send + 'static)`, `set_segment_callback_safe_lossy(FnMut(&str) + Send + 'static)`, and `set_abort_callback_safe(FnMut() -> bool + Send + 'static)`. If the pinned version exposes only `_unsafe` variants, stop and either upgrade `whisper-rs` or raise the issue — wrapping unsafe trampolines is out of scope for this task.
 
 - [ ] **Step 2: Write the test**
 
@@ -645,12 +682,18 @@ pub enum JobKind {
     PendingFile { wav_path: PathBuf, pending_id: i64 },
 }
 
+#[derive(Clone)]
 pub struct TranscriptionJob {
     pub id: i64,
     pub kind: JobKind,
     pub cancel_flag: Arc<AtomicBool>,
     pub committed_text: String,
 }
+
+// Cloning a `TranscriptionJob` clones the `Arc<AtomicBool>` — both copies
+// observe the same cancel flag. This is what lets `cancel_job` (which
+// holds the copy stored in `current_job`) signal the worker thread (which
+// owns the original).
 
 impl TranscriptionJob {
     pub fn new(id: i64, kind: JobKind) -> Self {
@@ -767,9 +810,9 @@ struct TextPayload {
 }
 
 #[derive(Clone, Serialize)]
-struct ErrorPayload {
-    id: i64,
-    error: String,
+pub struct ErrorPayload {
+    pub id: i64,
+    pub error: String,
 }
 
 #[derive(Clone, Serialize)]
@@ -777,9 +820,17 @@ struct CancelledPayload {
     id: i64,
 }
 
+use std::time::{Duration, Instant};
+
 /// Runs whisper on `samples`, updating the row in `store` and emitting
 /// `transcription://*` events. Returns the outcome so the orchestrator
 /// can choose the terminal action (mark_complete, delete, leave partial).
+///
+/// Persistence is debounced: SQLite writes happen at most every
+/// `PERSIST_DEBOUNCE_MS` to avoid fsync storms during fast segment cadence.
+/// The Tauri text event is emitted on every segment for live UI feedback.
+/// `finish_job`'s Complete arm performs the final authoritative write, so
+/// no data is lost if the last debounced write was skipped.
 pub fn run_finalize_dictation(
     job: &TranscriptionJob,
     transcriber: &Transcriber,
@@ -789,6 +840,8 @@ pub fn run_finalize_dictation(
     store: Arc<Mutex<Store>>,
     app_handle: AppHandle,
 ) -> FinalizeOutcome {
+    const PERSIST_DEBOUNCE_MS: u64 = 1000;
+
     let id = job.id;
     let cancel_flag = job.cancel_flag.clone();
     let committed_prefix = job.committed_text.clone();
@@ -798,6 +851,8 @@ pub fn run_finalize_dictation(
     let acc_for_callback = accumulated.clone();
     let store_for_callback = store.clone();
     let app_for_callback = app_handle.clone();
+    let last_persist = Arc::new(Mutex::new(Instant::now()));
+    let last_persist_for_callback = last_persist.clone();
 
     let on_progress = {
         let app = app_handle.clone();
@@ -812,20 +867,45 @@ pub fn run_finalize_dictation(
         if trimmed.is_empty() {
             return;
         }
-        let new_text = {
-            let mut acc = acc_for_callback.lock().expect("acc lock");
-            if acc.is_empty() {
-                acc.push_str(trimmed);
-            } else {
-                acc.push(' ');
-                acc.push_str(trimmed);
+        // Lock guards may be poisoned if a previous callback panicked. Take
+        // the inner value via `into_inner` semantics by `unwrap_or_else`,
+        // but for our case we just skip the segment on poison rather than
+        // propagate panic into whisper's inference thread.
+        let new_text = match acc_for_callback.lock() {
+            Ok(mut acc) => {
+                if acc.is_empty() {
+                    acc.push_str(trimmed);
+                } else {
+                    acc.push(' ');
+                    acc.push_str(trimmed);
+                }
+                acc.clone()
             }
-            acc.clone()
+            Err(_) => return,
         };
 
-        if let Ok(s) = store_for_callback.lock() {
-            let _ = s.update_text(id, &new_text, duration_secs);
+        // Debounced persistence: write at most once per PERSIST_DEBOUNCE_MS.
+        // The final authoritative write happens in finish_job's Complete arm.
+        let should_persist = match last_persist_for_callback.lock() {
+            Ok(mut last) => {
+                if last.elapsed() >= Duration::from_millis(PERSIST_DEBOUNCE_MS) {
+                    *last = Instant::now();
+                    true
+                } else {
+                    false
+                }
+            }
+            Err(_) => false,
+        };
+
+        if should_persist {
+            if let Ok(s) = store_for_callback.lock() {
+                let _ = s.update_text(id, &new_text, duration_secs);
+            }
         }
+
+        // Emit on every segment — UI feedback should be immediate even when
+        // SQLite writes are debounced.
         let _ = app_for_callback.emit(
             "transcription://text",
             TextPayload { id, text: new_text },
@@ -843,23 +923,32 @@ pub fn run_finalize_dictation(
         on_abort,
     );
 
-    if cancel_flag.load(std::sync::atomic::Ordering::Acquire) {
-        return FinalizeOutcome::Cancelled;
-    }
-
+    // Trust whisper's return value: an aborted inference returns Err. Do
+    // NOT post-hoc check the cancel flag against an Ok result — that would
+    // turn a successful-but-late-cancel into a phantom cancellation
+    // (deleting work the user actually got back).
     match result {
         Ok(_) => {
-            let final_text = accumulated.lock().expect("acc lock").clone();
-            // Final flush in case segment callback missed anything.
-            if let Ok(s) = store.lock() {
-                let _ = s.update_text(id, &final_text, duration_secs);
-            }
+            let final_text = accumulated
+                .lock()
+                .map(|a| a.clone())
+                .unwrap_or(committed_prefix);
             FinalizeOutcome::Complete { final_text, duration_secs }
+        }
+        Err(_) if cancel_flag.load(std::sync::atomic::Ordering::Acquire) => {
+            FinalizeOutcome::Cancelled
         }
         Err(e) => FinalizeOutcome::Error(e),
     }
 }
 ```
+
+Notes on the rewrite vs. the original sketch:
+
+1. **Debounced persistence (1s)** — segment callbacks fire on whisper's inference thread; per-segment fsync against SQLite was a P2 contention risk. The Tauri text event still fires on every segment for live UI feedback.
+2. **No `.expect("acc lock")`** — a poisoned mutex (from a prior callback panic) skips the segment instead of propagating panic into whisper's inference thread.
+3. **No redundant final flush** — `finish_job`'s Complete arm calls `update_text` then `mark_complete` as the single terminal write.
+4. **Cancel signal trusted via whisper's return** — `Ok(_)` is always a successful completion; only `Err` with `cancel_flag` set is a cancellation. This closes the "cancel-at-completion-boundary" race surfaced by the adversarial review.
 
 - [ ] **Step 2: Verify it compiles**
 
@@ -902,7 +991,7 @@ pub fn run_finalize_pending_file(
     store: Arc<Mutex<Store>>,
     app_handle: AppHandle,
 ) -> FinalizeOutcome {
-    let samples = match crate::transcribe::whisper::Transcriber::load_wav_as_mono_f32_pub(wav_path) {
+    let samples = match crate::transcribe::whisper::Transcriber::load_wav_as_mono_f32(wav_path) {
         Ok(s) => s,
         Err(e) => return FinalizeOutcome::Error(format!("Failed to read WAV: {}", e)),
     };
@@ -928,15 +1017,7 @@ pub fn run_finalize_pending_file(
 
 In `src-tauri/src/transcribe/whisper.rs`:
 
-(a) Rename or alias the private `load_wav_as_mono_f32` for public use. Add:
-
-```rust
-pub fn load_wav_as_mono_f32_pub(path: &std::path::Path) -> Result<Vec<f32>, String> {
-    Self::load_wav_as_mono_f32(path)
-}
-```
-
-inside `impl Transcriber`.
+(a) Make `load_wav_as_mono_f32` public — change `fn load_wav_as_mono_f32(...)` to `pub fn load_wav_as_mono_f32(...)` on the existing definition (around line 82). Do not add a wrapper; per CLAUDE.md, "Avoid empty abstractions."
 
 (b) The existing `wav_duration_secs` helper currently lives in `src-tauri/src/lib.rs`. Move it into `src-tauri/src/transcribe/whisper.rs` as a free function `pub fn wav_duration_secs(...)` and reference it from `lib.rs` as `transcribe::whisper::wav_duration_secs`. After moving, delete the original from `lib.rs`.
 
@@ -971,7 +1052,10 @@ struct CompletePayload {
 }
 
 /// Apply the terminal effect of a finalize run to the DB and the filesystem,
-/// then emit the matching event.
+/// then emit the matching event. The caller is responsible for clearing
+/// `current_job` from `AppState` BEFORE calling `finish_job` so that any
+/// frontend handler reacting to the emitted terminal event can immediately
+/// initiate a new job without seeing a stale `current_job` reservation.
 pub fn finish_job(
     job: TranscriptionJob,
     outcome: FinalizeOutcome,
@@ -1002,19 +1086,18 @@ pub fn finish_job(
         }
         FinalizeOutcome::Cancelled => {
             if let Ok(s) = store.lock() {
+                // Cancel = discard everything. The transcription row, if
+                // any, is removed. For pending-file kind we leave BOTH the
+                // WAV and the pending_recordings row untouched so the user
+                // can simply click Transcrever again.
                 let _ = s.delete(id);
-                if let JobKind::PendingFile { wav_path, .. } = &job.kind {
-                    let _ = std::fs::remove_file(wav_path);
-                    // Note: we do NOT delete the pending_recordings row here —
-                    // the user cancelled the transcription, but the recording
-                    // itself remains a valid pending recording until they
-                    // explicitly delete it.
-                }
             }
             let _ = app_handle.emit("transcription://cancelled", CancelledPayload { id });
         }
         FinalizeOutcome::Error(err) => {
-            // Row stays partial with whatever the segment callback persisted.
+            // Row stays partial (status='partial') with whatever the
+            // debounced segment callback persisted. The user sees it in
+            // History via the partial badge — same shape as crash recovery.
             let _ = app_handle.emit(
                 "transcription://error",
                 ErrorPayload { id, error: err },
@@ -1024,7 +1107,10 @@ pub fn finish_job(
 }
 ```
 
-Note on the cancelled branch: for dictation there is no `pending_recordings` row at all (audio is in memory), so deleting one is a no-op. For pending-file, the WAV existed before the user clicked Transcrever; cancelling the transcription should leave the recording in place so they can retry, which is why we do not delete the pending row here. This matches the spec.
+Notes on the cancelled and error branches:
+- **Cancel = discard all** (matches the modal copy "O conteúdo será descartado"). Earlier drafts had `keepPartial`/`discardPartial` strings implying a preserve-partial choice; those are dropped (Task 16). Partial state is reserved for unintentional crashes, not deliberate cancellation.
+- **Pending-file cancel** preserves both the WAV and the pending_recordings row — the original asymmetric "delete WAV but keep row" behavior produced a phantom-retry that always failed.
+- **Empty-partial sweep on startup** (added in Task 5b below) deletes any partial row with empty text and zero duration — these can only come from a force-kill that happened before the first segment callback fired, and they are visually indistinguishable from real transcriptions in History.
 
 - [ ] **Step 2: Compile**
 
@@ -1066,15 +1152,15 @@ Note that `store` becomes `Arc<Mutex<Store>>` so worker threads can hold a refer
 
 - [ ] **Step 2: Update the setup block where `AppState` is constructed**
 
-In the existing `setup` closure (around line 350), wrap the store in an Arc:
+In the existing `setup` closure (around line 350), wrap the store in an Arc. The `delete_empty_partials` call belongs here too — Task 5 wires it in.
 
 ```rust
 let store = Store::new(&db_path).expect("Failed to create store");
-let recovered = store
-    .reset_partial_on_startup()
-    .expect("Failed to reset partial transcriptions on startup");
-if recovered > 0 {
-    eprintln!("[startup] reset {} stale transcription(s) to status='partial'", recovered);
+let swept = store
+    .delete_empty_partials()
+    .expect("Failed to sweep empty partials on startup");
+if swept > 0 {
+    eprintln!("[startup] swept {} empty partial transcription(s)", swept);
 }
 
 app.manage(AppState {
@@ -1086,6 +1172,8 @@ app.manage(AppState {
     current_job: Mutex::new(None),
 });
 ```
+
+Also note: `state.store.clone()` now produces a new `Arc` reference (not a cloned `Store`). This is what enables worker threads to hold a shared reference — Tasks 12 and 13 rely on it.
 
 - [ ] **Step 3: Update every existing `state.store.lock()` call**
 
@@ -1118,27 +1206,19 @@ The new `stop_dictation`:
 
 The `run_transcription_loop` in `dictation.rs` keeps emitting live text during recording (existing behavior) but is no longer responsible for the final emit — the new worker takes over after stop.
 
-- [ ] **Step 1: Expose committed segments + buffer drain on `DictationSession`**
+- [ ] **Step 1: Add JoinHandle + last_full_text to DictationSession; expose committed segments and buffer drain**
 
-Edit `src-tauri/src/dictation.rs`. Add to `DictationSession`:
+The original draft of this step had a fatal race: the live `run_transcription_loop` may still be mid-`transcribe_samples` when `stop_dictation` runs. Without a join, `drain_buffer` returns *less* than what was captured (samples are stuck inside the live loop's stack frame), and the live loop's transcriber is still in use when `stop_dictation` calls `take()` on the cache — leading to two whisper contexts loaded simultaneously. Both surfaced as P0s in review.
 
-```rust
-pub fn drain_buffer(&self) -> Vec<f32> {
-    let mut buf = self.audio_buffer.lock().expect("buffer lock");
-    let drained = buf.drain(..).collect();
-    drained
-}
-```
+Fix: **own a `std::thread::JoinHandle<()>` on `DictationSession`**, switch the dictation loop from `tauri::async_runtime::spawn_blocking` to `std::thread::spawn`, and join it in `stop_dictation` before doing anything else. By the time we read `committed`/`drain_buffer`, the live loop has fully exited and put the cached transcriber back.
 
-(Existing `stop` already sets `running=false` and drops the stream; the worker still running will exit on next loop check.)
-
-The `run_transcription_loop` returns `Vec<String>` of committed segments. Today this return value is dropped on the floor (the spawned task discards it). We need to capture it.
-
-Refactor the spawn in `start_dictation` (around line 250 in `lib.rs`) to send the committed segments into a shared `Mutex<Option<Vec<String>>>` that lives on the `DictationSession`.
+Also add `last_full_text` so `stop_dictation` can seed the finalize worker with the most recent live-emitted transcription as the committed prefix — this turns the short-dictation case (under one rollover) from "re-transcribe everything from scratch" into "re-transcribe the un-committed tail."
 
 In `src-tauri/src/dictation.rs`:
 
 ```rust
+use std::thread::JoinHandle;
+
 pub struct DictationSession {
     stream: Option<Stream>,
     audio_buffer: Arc<Mutex<Vec<f32>>>,
@@ -1146,61 +1226,71 @@ pub struct DictationSession {
     source_rate: u32,
     channels: u16,
     committed: Arc<Mutex<Vec<String>>>,
+    last_full_text: Arc<Mutex<String>>,
+    worker: Option<JoinHandle<()>>,
 }
 ```
 
-Initialize `committed: Arc::new(Mutex::new(Vec::new()))` in `new()`.
+Initialize the new fields in `new()`:
 
-Add:
+```rust
+committed: Arc::new(Mutex::new(Vec::new())),
+last_full_text: Arc::new(Mutex::new(String::new())),
+worker: None,
+```
+
+Add accessors and the buffer drain:
 
 ```rust
 pub fn committed(&self) -> Arc<Mutex<Vec<String>>> {
     self.committed.clone()
 }
+
+pub fn last_full_text(&self) -> Arc<Mutex<String>> {
+    self.last_full_text.clone()
+}
+
+pub fn set_worker(&mut self, handle: JoinHandle<()>) {
+    self.worker = Some(handle);
+}
+
+/// Stops the audio stream, signals the worker, and joins it.
+/// Returns only after the worker has fully exited.
+pub fn stop_and_join(&mut self) {
+    self.running.store(false, std::sync::atomic::Ordering::Release);
+    self.stream.take();  // drops the stream, stopping capture
+    if let Some(handle) = self.worker.take() {
+        let _ = handle.join();
+    }
+}
+
+pub fn drain_buffer(&self) -> Vec<f32> {
+    self.audio_buffer
+        .lock()
+        .map(|mut buf| buf.drain(..).collect())
+        .unwrap_or_default()
+}
 ```
 
-Modify `run_transcription_loop` to take an extra parameter `committed_out: Arc<Mutex<Vec<String>>>` and replace its current `Vec::new()` declaration with a `let mut committed_segments = ...`. At the points where the loop pushes to `committed_segments`, also clone into `committed_out`. Specifically, find the two `committed_segments.push(text)` calls (in the rollover case and in the final-block case) and add right after each:
+Modify `run_transcription_loop` to take two extra parameters: `committed_out: Arc<Mutex<Vec<String>>>` and `last_full_text_out: Arc<Mutex<String>>`. After every `committed_segments.push(text)` (rollover and final-block cases), also push into `committed_out`. After every emit of `dictation://segment` with `fullText`, also overwrite `last_full_text_out`:
 
 ```rust
 if let Ok(mut sink) = committed_out.lock() {
     sink.push(text.clone());
 }
+// After emitting the dictation://segment event:
+if let Ok(mut last) = last_full_text_out.lock() {
+    *last = full_text.clone();
+}
 ```
 
-The function still returns `committed_segments` for backward compat in case anyone reads it; but the new path reads `committed_out`.
+Note: this preserves the existing `dictation://segment` emit (which Task 20's frontend uses for live-during-recording feedback) while exposing the same `fullText` to the backend for the prefix.
 
-- [ ] **Step 2: Update `start_dictation` in `lib.rs` to pass `committed_out`**
+- [ ] **Step 2: Update `start_dictation` in `lib.rs` to use `std::thread::spawn` and store the JoinHandle**
 
-Find the spawn in `start_dictation`. Replace:
+The existing code uses `tauri::async_runtime::spawn` (or `spawn_blocking`) for the live transcription loop, which gives a JoinHandle that can only be awaited from async context — useless from synchronous `stop_dictation`. Switch to `std::thread::spawn`, capture the handle, and store it on the session so `stop_and_join` can wait deterministically.
 
-```rust
-let segments = dictation::run_transcription_loop(
-    buffer,
-    running,
-    &transcriber,
-    &language,
-    source_rate,
-    channels,
-    handle,
-);
-```
-
-with:
-
-```rust
-let segments = dictation::run_transcription_loop(
-    buffer,
-    running,
-    committed_out,
-    &transcriber,
-    &language,
-    source_rate,
-    channels,
-    handle,
-);
-```
-
-and add (just before the spawn) a `let committed_out = session_ref.committed();` — where `session_ref` is the `DictationSession` you can clone the Arc from before the session is moved into the AppState mutex. This requires fetching the committed handle from the just-built `DictationSession` *before* `*state.dictation.lock() = Some(session);`. Reorder the existing code:
+Reorder so accessors are pulled BEFORE the session moves into AppState:
 
 ```rust
 let mut session = DictationSession::new();
@@ -1210,18 +1300,63 @@ let buffer = session.buffer();
 let running = session.running_flag();
 let source_rate = session.source_rate();
 let channels = session.channels();
-let committed_out = session.committed();   // <-- NEW
+let committed_out = session.committed();
+let last_full_text_out = session.last_full_text();
+
+// Take the transcriber out of the cache — the live loop owns it until
+// it exits. Stop_dictation will only `.take()` from the cache AFTER
+// joining, by which point the live loop has put it back.
+let transcriber = state
+    .transcriber
+    .lock()
+    .map_err(|e| e.to_string())?
+    .take()
+    .ok_or("Transcriber not initialised")?;
+
+let app_handle_for_loop = app_handle.clone();
+let language_owned = language.clone();
+
+let worker = std::thread::spawn(move || {
+    dictation::run_transcription_loop(
+        buffer,
+        running,
+        committed_out,
+        last_full_text_out,
+        &transcriber,
+        &language_owned,
+        source_rate,
+        channels,
+        app_handle_for_loop.clone(),
+    );
+
+    // Restore the transcriber to the cache for the finalize worker.
+    let app_state = app_handle_for_loop.try_state::<AppState>();
+    if let Some(s) = app_state {
+        let _ = s.transcriber.lock().map(|mut g| *g = Some(transcriber));
+    }
+});
+
+session.set_worker(worker);
 
 *state.dictation.lock().map_err(|e| e.to_string())? = Some(session);
-
-// (existing lines that build the spawn, now passing committed_out)
 ```
+
+Two notes on this rewrite:
+- The transcriber is restored to the cache *inside the worker thread* on exit. This guarantees `stop_dictation` (after joining the worker) sees the transcriber back in the cache, avoiding the dual-load OOM scenario.
+- `try_state` instead of `state` so a window-close during shutdown does not panic.
 
 - [ ] **Step 3: Replace the body of `stop_dictation`**
 
-Delete the existing `stop_dictation` async function entirely and replace with:
+Delete the existing `stop_dictation` async function entirely and replace with the version below. Compared to earlier drafts:
+- The `current_job` reservation is **atomic** — held across the entire setup so two concurrent stops cannot both pass the gate.
+- The live worker is **joined before** reading `committed`/`drain_buffer`, eliminating the audio-loss race (P0 from review).
+- `last_full_text` seeds the worker as `committed_text` so short dictations don't re-transcribe everything from scratch (P1 from review).
+- `catch_unwind` wraps the worker body so a panic still clears `current_job` and emits `transcription://error`.
+- `current_job` is cleared **before** `finish_job` emits its terminal event so a fast frontend handler can immediately start a new job.
 
 ```rust
+use std::panic::AssertUnwindSafe;
+
 #[tauri::command]
 async fn stop_dictation(
     state: State<'_, AppState>,
@@ -1234,113 +1369,149 @@ async fn stop_dictation(
         finish_job, run_finalize_dictation, JobKind, TranscriptionJob,
     };
 
-    // Reject if another job is already finalizing.
-    {
-        let guard = state.current_job.lock().map_err(|e| e.to_string())?;
-        if guard.is_some() {
-            return Err("Another transcription is in progress".to_string());
-        }
+    // Hold the dictation lock across the entire reservation so two concurrent
+    // stop_dictation calls cannot both pass the "no job in progress" check.
+    let mut dictation_guard = state.dictation.lock().map_err(|e| e.to_string())?;
+    let session = dictation_guard
+        .as_mut()
+        .ok_or("No dictation in progress")?;
+
+    // Atomic reservation: hold current_job lock across the check-and-set.
+    let mut job_guard = state.current_job.lock().map_err(|e| e.to_string())?;
+    if job_guard.is_some() {
+        return Err("Another transcription is in progress".to_string());
     }
 
-    // Stop capture and pull audio + committed text.
-    let (samples, committed) = {
-        let mut guard = state.dictation.lock().map_err(|e| e.to_string())?;
-        let session = guard.as_mut().ok_or("No dictation in progress")?;
-        session.stop();
-        let samples = session.drain_buffer();
-        let committed = session
+    // Join the live transcription loop. After this returns, the live worker
+    // has put the cached transcriber back and the audio buffer is fully
+    // drained into the loop's local accumulator (none stuck in flight).
+    session.stop_and_join();
+
+    let samples = session.drain_buffer();
+    let last_full = session
+        .last_full_text()
+        .lock()
+        .map(|s| s.clone())
+        .unwrap_or_default();
+    // Use the live loop's most recent fullText as the committed prefix.
+    // Fallback to joined committed segments for the rollover case.
+    let committed_prefix = if !last_full.trim().is_empty() {
+        last_full.trim().to_string()
+    } else {
+        session
             .committed()
             .lock()
-            .map_err(|e| e.to_string())?
-            .join(" ")
-            .trim()
-            .to_string();
-        // Take the session out so the next start_dictation works fresh.
-        *guard = None;
-        (samples, committed)
+            .map(|c| c.join(" ").trim().to_string())
+            .unwrap_or_default()
     };
 
-    // Insert partial row up front.
+    // Take the session out so the next start_dictation works fresh.
+    *dictation_guard = None;
+    drop(dictation_guard);
+
+    // Insert partial row up front. If the user force-kills before the first
+    // segment callback fires, this row will be swept on next launch by
+    // delete_empty_partials (Task 5).
     let id = {
         let store = state.store.lock().map_err(|e| e.to_string())?;
         let new_id = store.insert_partial(&title, &language)?;
-        if !committed.is_empty() {
-            store.update_text(new_id, &committed, duration_secs)?;
+        if !committed_prefix.is_empty() {
+            store.update_text(new_id, &committed_prefix, duration_secs)?;
         }
         new_id
     };
 
-    // Build the job and store it.
     let mut job = TranscriptionJob::new(id, JobKind::Dictation);
-    job.committed_text = committed;
-    let cancel_flag = job.cancel_flag.clone();
+    job.committed_text = committed_prefix;
     let job_id = job.id;
 
-    *state.current_job.lock().map_err(|e| e.to_string())? = Some(TranscriptionJob {
-        id: job.id,
-        kind: job.kind.clone(),
-        cancel_flag: cancel_flag.clone(),
-        committed_text: job.committed_text.clone(),
-    });
+    *job_guard = Some(job.clone());
+    drop(job_guard);
 
-    // Spawn the worker.
-    let store = state.store.clone();
+    let store_for_worker = state.store.clone();
     let app = app_handle.clone();
-    let transcriber_arc = state.transcriber.lock().map_err(|e| e.to_string())?.take();
+    // After stop_and_join, the cache holds the live worker's transcriber.
+    let transcriber_taken = state.transcriber.lock().map_err(|e| e.to_string())?.take();
     let model_path = crate::model::model_path(&state.data_dir);
 
-    tauri::async_runtime::spawn_blocking(move || {
-        let transcriber = match transcriber_arc {
+    std::thread::spawn(move || {
+        let transcriber = match transcriber_taken {
             Some(t) => t,
             None => match Transcriber::new(&model_path) {
                 Ok(t) => t,
                 Err(e) => {
-                    let _ = app.emit(
-                        "transcription://error",
-                        serde_json::json!({ "id": job_id, "error": e }),
-                    );
+                    clear_current_job_and_emit_error(&app, job_id, e);
                     return;
                 }
             },
         };
 
-        let outcome = run_finalize_dictation(
-            &job,
-            &transcriber,
-            samples,
-            duration_secs,
-            language,
-            store.clone(),
-            app.clone(),
-        );
+        // Wrap the finalize body in catch_unwind so a panic still leaves
+        // the system recoverable (current_job cleared, transcriber not lost
+        // forever, error event fired). Frontend will see error and unblock.
+        let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            let outcome = run_finalize_dictation(
+                &job,
+                &transcriber,
+                samples,
+                duration_secs,
+                language,
+                store_for_worker.clone(),
+                app.clone(),
+            );
+            (job, outcome)
+        }));
 
-        finish_job(job, outcome, store, app.clone());
+        let (job, outcome) = match result {
+            Ok(t) => t,
+            Err(_panic) => {
+                clear_current_job_and_emit_error(
+                    &app,
+                    job_id,
+                    "Transcription worker panicked".to_string(),
+                );
+                // Restore transcriber so subsequent jobs work.
+                if let Some(s) = app.try_state::<AppState>() {
+                    let _ = s.transcriber.lock().map(|mut g| *g = Some(transcriber));
+                }
+                return;
+            }
+        };
 
-        // Restore transcriber to cache and clear current_job.
-        let app_state = app.state::<AppState>();
-        let _ = app_state
-            .transcriber
-            .lock()
-            .map(|mut g| *g = Some(transcriber));
-        let _ = app_state.current_job.lock().map(|mut g| *g = None);
+        // Clear current_job and restore transcriber BEFORE finish_job emits
+        // the terminal event. Otherwise a fast frontend handler reacting to
+        // complete/cancelled may issue a new command and see a stale
+        // "Another transcription is in progress" rejection.
+        if let Some(s) = app.try_state::<AppState>() {
+            let _ = s.transcriber.lock().map(|mut g| *g = Some(transcriber));
+            let _ = s.current_job.lock().map(|mut g| *g = None);
+        }
+
+        finish_job(job, outcome, store_for_worker, app);
     });
 
     Ok(id)
 }
-```
 
-The TranscriptionJob is built twice because `Clone` isn't free — simplest to derive `Clone` on it. Add to `src-tauri/src/transcribe/job.rs`:
-
-```rust
-#[derive(Clone)]
-pub struct TranscriptionJob {
-    // … existing fields
+fn clear_current_job_and_emit_error(
+    app: &tauri::AppHandle,
+    job_id: i64,
+    error: String,
+) {
+    if let Some(s) = app.try_state::<AppState>() {
+        let _ = s.current_job.lock().map(|mut g| *g = None);
+    }
+    let _ = app.emit(
+        "transcription://error",
+        crate::transcribe::job::ErrorPayload {
+            id: job_id,
+            error,
+        },
+    );
 }
 ```
 
-(`Arc<AtomicBool>` is `Clone`; `String` is `Clone`; `JobKind` already derives `Clone`; `i64` is `Copy`. So the derive is sound.)
-
-Then in the command, replace the manual rebuild with `state.current_job.lock()...? = Some(job.clone());`.
+`ErrorPayload` is the typed struct defined in Task 8; expose it as `pub` in `job.rs` and re-import here so we don't have two payload shapes for the same event. (Earlier drafts used `serde_json::json!({...})` for the early-error path and the typed struct elsewhere — review flagged this as a divergence risk.)
 
 - [ ] **Step 4: Compile**
 
@@ -1367,9 +1538,13 @@ Remove the entire `transcribe_recording` async function from `src-tauri/src/lib.
 
 - [ ] **Step 2: Add the replacement**
 
+Mirrors `stop_dictation`'s shape: atomic `current_job` reservation, `catch_unwind` around the worker, `current_job` cleared before `finish_job` emits, typed `ErrorPayload`, `try_state` instead of `state`.
+
 Add this command to `src-tauri/src/lib.rs`:
 
 ```rust
+use std::panic::AssertUnwindSafe;
+
 #[tauri::command]
 async fn transcribe_pending_recording(
     state: State<'_, AppState>,
@@ -1379,14 +1554,14 @@ async fn transcribe_pending_recording(
     language: String,
 ) -> Result<i64, String> {
     use crate::transcribe::job::{
-        finish_job, run_finalize_pending_file, JobKind, TranscriptionJob,
+        finish_job, run_finalize_pending_file, ErrorPayload, JobKind,
+        TranscriptionJob,
     };
 
-    {
-        let guard = state.current_job.lock().map_err(|e| e.to_string())?;
-        if guard.is_some() {
-            return Err("Another transcription is in progress".to_string());
-        }
+    // Atomic reservation: hold current_job lock across the check-and-set.
+    let mut job_guard = state.current_job.lock().map_err(|e| e.to_string())?;
+    if job_guard.is_some() {
+        return Err("Another transcription is in progress".to_string());
     }
 
     let pending = {
@@ -1414,47 +1589,72 @@ async fn transcribe_pending_recording(
         },
     );
 
-    *state.current_job.lock().map_err(|e| e.to_string())? = Some(job.clone());
+    *job_guard = Some(job.clone());
+    drop(job_guard);
 
-    let store = state.store.clone();
+    let store_for_worker = state.store.clone();
     let app = app_handle.clone();
-    let transcriber_arc = state.transcriber.lock().map_err(|e| e.to_string())?.take();
+    let transcriber_taken = state.transcriber.lock().map_err(|e| e.to_string())?.take();
     let model_path = crate::model::model_path(&state.data_dir);
     let language_owned = language.clone();
     let job_id = id;
+    let wav_for_worker = wav_path.clone();
 
-    tauri::async_runtime::spawn_blocking(move || {
-        let transcriber = match transcriber_arc {
+    std::thread::spawn(move || {
+        let transcriber = match transcriber_taken {
             Some(t) => t,
             None => match Transcriber::new(&model_path) {
                 Ok(t) => t,
                 Err(e) => {
+                    if let Some(s) = app.try_state::<AppState>() {
+                        let _ = s.current_job.lock().map(|mut g| *g = None);
+                    }
                     let _ = app.emit(
                         "transcription://error",
-                        serde_json::json!({ "id": job_id, "error": e }),
+                        ErrorPayload { id: job_id, error: e },
                     );
                     return;
                 }
             },
         };
 
-        let outcome = run_finalize_pending_file(
-            &job,
-            &transcriber,
-            &wav_path,
-            language_owned,
-            store.clone(),
-            app.clone(),
-        );
+        let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            let outcome = run_finalize_pending_file(
+                &job,
+                &transcriber,
+                &wav_for_worker,
+                language_owned,
+                store_for_worker.clone(),
+                app.clone(),
+            );
+            (job, outcome)
+        }));
 
-        finish_job(job, outcome, store, app.clone());
+        let (job, outcome) = match result {
+            Ok(t) => t,
+            Err(_panic) => {
+                if let Some(s) = app.try_state::<AppState>() {
+                    let _ = s.transcriber.lock().map(|mut g| *g = Some(transcriber));
+                    let _ = s.current_job.lock().map(|mut g| *g = None);
+                }
+                let _ = app.emit(
+                    "transcription://error",
+                    ErrorPayload {
+                        id: job_id,
+                        error: "Transcription worker panicked".to_string(),
+                    },
+                );
+                return;
+            }
+        };
 
-        let app_state = app.state::<AppState>();
-        let _ = app_state
-            .transcriber
-            .lock()
-            .map(|mut g| *g = Some(transcriber));
-        let _ = app_state.current_job.lock().map(|mut g| *g = None);
+        // Clear current_job and restore transcriber before finish_job emits.
+        if let Some(s) = app.try_state::<AppState>() {
+            let _ = s.transcriber.lock().map(|mut g| *g = Some(transcriber));
+            let _ = s.current_job.lock().map(|mut g| *g = None);
+        }
+
+        finish_job(job, outcome, store_for_worker, app);
     });
 
     Ok(id)
@@ -1479,10 +1679,12 @@ git commit -m "feat(transcribe): replace transcribe_recording with async pending
 
 ---
 
-### Task 14: Add `cancel_job` and `current_job_status` commands
+### Task 14: Add `cancel_job` command
 
 **Files:**
 - Modify: `src-tauri/src/lib.rs`
+
+The earlier draft also added `current_job_status` for "UI re-sync if the page is reloaded mid-job," but no frontend code calls it. Drop it as dead IPC surface; reintroduce when there is a real caller.
 
 - [ ] **Step 1: Add `cancel_job`**
 
@@ -1497,46 +1699,20 @@ fn cancel_job(state: State<'_, AppState>) -> Result<(), String> {
 }
 ```
 
-The actual cleanup (delete row, delete WAV) happens in the worker thread when `transcribe_with_callbacks` aborts and `finish_job` runs the `Cancelled` arm. The worker also clears `current_job` itself.
+The actual cleanup (delete row, leave pending WAV+row alone) happens in the worker thread once `transcribe_with_callbacks` returns `Err` from the abort flag and `finish_job` runs the `Cancelled` arm. The worker also clears `current_job` itself before `finish_job` emits — see Task 12 Step 3.
 
-- [ ] **Step 2: Add `current_job_status`**
+- [ ] **Step 2: Register the command in `tauri::generate_handler!`**
 
-```rust
-use serde::Serialize;
-
-#[derive(Clone, Serialize)]
-struct JobStatus {
-    id: i64,
-    kind: String,
-    cancelling: bool,
-}
-
-#[tauri::command]
-fn current_job_status(state: State<'_, AppState>) -> Result<Option<JobStatus>, String> {
-    let guard = state.current_job.lock().map_err(|e| e.to_string())?;
-    Ok(guard.as_ref().map(|job| JobStatus {
-        id: job.id,
-        kind: match &job.kind {
-            transcribe::job::JobKind::Dictation => "dictation".to_string(),
-            transcribe::job::JobKind::PendingFile { .. } => "pending_file".to_string(),
-        },
-        cancelling: job.is_cancelled(),
-    }))
-}
-```
-
-- [ ] **Step 3: Register both commands in `tauri::generate_handler!`**
-
-- [ ] **Step 4: Compile**
+- [ ] **Step 3: Compile**
 
 Run: `cd src-tauri && cargo check`
 Expected: compiles.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
 git add src-tauri/src/lib.rs
-git commit -m "feat(commands): cancel_job and current_job_status"
+git commit -m "feat(commands): cancel_job"
 ```
 
 ---
@@ -1573,20 +1749,22 @@ git commit -m "chore: cargo fmt + clippy fixes for finalizing flow"
 
 - [ ] **Step 1: Add the new keys to both `pt` and `en`**
 
+Cancel semantic is **discard everything** (matches the modal copy), so no `keepPartial`/`discardPartial` strings — they were dead code in earlier drafts. We also add `loadingModel` and `recordedDuration` for the indeterminate-progress state and the orientation context shown above the progress ring.
+
 Append inside the `pt` block (before the closing brace):
 
 ```js
     finalizing: "Finalizando transcrição…",
     finalizingHint: "Pode levar alguns minutos numa máquina lenta.",
+    loadingModel: "Carregando modelo…",
+    recordedDuration: "Gravação:",
     cancelTranscription: "Cancelar",
     cancelConfirmTitle: "Cancelar transcrição?",
-    cancelConfirmBody: "O conteúdo será perdido.",
+    cancelConfirmBody: "O conteúdo será descartado.",
     cancelConfirmYes: "Sim, cancelar",
     cancelConfirmNo: "Voltar",
     navLockedTooltip: "Aguarde a transcrição terminar",
     partialBadge: "Parcial",
-    keepPartial: "Manter o que foi transcrito",
-    discardPartial: "Descartar",
 ```
 
 Append inside the `en` block (before the closing brace):
@@ -1594,15 +1772,15 @@ Append inside the `en` block (before the closing brace):
 ```js
     finalizing: "Finalizing transcription…",
     finalizingHint: "May take a few minutes on a slow machine.",
+    loadingModel: "Loading model…",
+    recordedDuration: "Recorded:",
     cancelTranscription: "Cancel",
     cancelConfirmTitle: "Cancel transcription?",
-    cancelConfirmBody: "The content will be lost.",
+    cancelConfirmBody: "The content will be discarded.",
     cancelConfirmYes: "Yes, cancel",
     cancelConfirmNo: "Back",
     navLockedTooltip: "Wait for the transcription to finish",
     partialBadge: "Partial",
-    keepPartial: "Keep what was transcribed",
-    discardPartial: "Discard",
 ```
 
 - [ ] **Step 2: Run check**
@@ -1646,36 +1824,36 @@ git commit -m "feat: appBusy store for global navigation lock"
 
 ---
 
-### Task 18: Wire `appBusy` into the nav buttons
+### Task 18: Wire `appBusy` into the nav buttons (Record + Dictate only)
 
 **Files:**
 - Modify: `src/routes/+page.svelte`
 
-- [ ] **Step 1: Import the store and bind disabled state**
+History stays navigable during finalize. It is read-only; locking it forces the user to sit and stare at a progress ring during the multi-minute window when they most want to verify the app is alive. The single-job invariant is enforced by the backend, not the nav lock.
 
-Edit `src/routes/+page.svelte`. Add the import near the other imports:
+We use `aria-disabled` instead of the `disabled` attribute. Disabled HTML buttons drop out of the tab order and suppress hover events, which makes the tooltip unreliable in webview environments. With `aria-disabled` the element stays focusable, screen readers announce the disabled state, and CSS `cursor: not-allowed` still works.
+
+- [ ] **Step 1: Import the store**
 
 ```js
 import { appBusy } from "../lib/appBusy.js";
 ```
 
-- [ ] **Step 2: Apply `disabled` and tooltip to the three nav buttons**
-
-Replace the three `<button>` elements inside `<nav>` with:
+- [ ] **Step 2: Apply `aria-disabled` and click guards to Record + Dictate**
 
 ```svelte
 <button
     class:active={currentView === "recorder"}
-    onclick={showRecorder}
-    disabled={$appBusy}
+    onclick={() => $appBusy ? null : showRecorder()}
+    aria-disabled={$appBusy}
     title={$appBusy ? t("navLockedTooltip") : ""}
 >
     {t("record")}
 </button>
 <button
     class:active={currentView === "dictation"}
-    onclick={showDictation}
-    disabled={$appBusy}
+    onclick={() => $appBusy ? null : showDictation()}
+    aria-disabled={$appBusy}
     title={$appBusy ? t("navLockedTooltip") : ""}
 >
     {t("dictation")}
@@ -1683,19 +1861,15 @@ Replace the three `<button>` elements inside `<nav>` with:
 <button
     class:active={currentView === "history"}
     onclick={showHistory}
-    disabled={$appBusy}
-    title={$appBusy ? t("navLockedTooltip") : ""}
 >
     {t("history")}
 </button>
 ```
 
-- [ ] **Step 3: Add `disabled` styling**
-
-In the `<style>` block at the bottom of `+page.svelte`, after the existing `nav button` rules, add:
+- [ ] **Step 3: Add `aria-disabled` styling**
 
 ```css
-nav button:disabled {
+nav button[aria-disabled="true"] {
     opacity: 0.4;
     cursor: not-allowed;
 }
@@ -1710,7 +1884,7 @@ Expected: clean.
 
 ```bash
 git add src/routes/+page.svelte
-git commit -m "feat(ui): nav buttons disable while a job is finalizing"
+git commit -m "feat(ui): lock Record and Dictate during finalize; keep History free"
 ```
 
 ---
@@ -1725,33 +1899,93 @@ git commit -m "feat(ui): nav buttons disable while a job is finalizing"
 ```svelte
 <script>
     import { t } from "./i18n.js";
+    import { tick } from "svelte";
 
-    let { percent = 0, liveText = "", onCancel } = $props();
+    let {
+        percent = 0,
+        liveText = "",
+        cancelling = false,
+        jobLabel = "",
+        onCancel,
+    } = $props();
     let confirming = $state(false);
+    let liveTextEl;
+    let dialogEl;
+    let lastFocused = null;
 
     const SIZE = 96;
     const STROKE = 8;
     const RADIUS = (SIZE - STROKE) / 2;
     const CIRCUMFERENCE = 2 * Math.PI * RADIUS;
 
-    let dashOffset = $derived(CIRCUMFERENCE * (1 - Math.max(0, Math.min(100, percent)) / 100));
+    let dashOffset = $derived(
+        CIRCUMFERENCE * (1 - Math.max(0, Math.min(100, percent)) / 100),
+    );
 
-    function requestCancel() {
+    // Whisper's progress callback only starts firing once inference begins.
+    // Before that — model load, audio decode, first segment — `percent`
+    // sits at 0. Show an indeterminate label so the user does not read
+    // a frozen 0% as "stuck."
+    let isIndeterminate = $derived(percent === 0 && !cancelling);
+
+    // Auto-scroll the live-text pane to the latest segment as it grows.
+    $effect(() => {
+        if (liveText && liveTextEl) {
+            liveTextEl.scrollTop = liveTextEl.scrollHeight;
+        }
+    });
+
+    async function requestCancel() {
+        if (cancelling) return;
+        lastFocused = document.activeElement;
         confirming = true;
+        await tick();
+        // Focus the safe default ("Voltar"), trap with Escape and Tab.
+        dialogEl?.querySelector(".btn-secondary")?.focus();
     }
 
     function dismissCancel() {
         confirming = false;
+        lastFocused?.focus?.();
     }
 
     function confirmCancel() {
         confirming = false;
+        lastFocused?.focus?.();
         onCancel?.();
+    }
+
+    function handleDialogKey(e) {
+        if (!confirming) return;
+        if (e.key === "Escape") {
+            e.preventDefault();
+            dismissCancel();
+            return;
+        }
+        if (e.key === "Tab") {
+            const focusables = dialogEl?.querySelectorAll("button");
+            if (!focusables || focusables.length === 0) return;
+            const first = focusables[0];
+            const last = focusables[focusables.length - 1];
+            if (e.shiftKey && document.activeElement === first) {
+                e.preventDefault();
+                last.focus();
+            } else if (!e.shiftKey && document.activeElement === last) {
+                e.preventDefault();
+                first.focus();
+            }
+        }
     }
 </script>
 
+<svelte:window on:keydown={handleDialogKey} />
+
 <div class="finalizing">
-    <div class="ring-wrap">
+    {#if jobLabel}
+        <span class="job-label">{jobLabel}</span>
+    {/if}
+
+    <div class="ring-wrap" class:indeterminate={isIndeterminate}>
         <svg width={SIZE} height={SIZE} viewBox="0 0 {SIZE} {SIZE}">
             <circle
                 cx={SIZE / 2}
@@ -1768,35 +2002,53 @@ git commit -m "feat(ui): nav buttons disable while a job is finalizing"
                 fill="none"
                 stroke="var(--info)"
                 stroke-width={STROKE}
-                stroke-dasharray={CIRCUMFERENCE}
-                stroke-dashoffset={dashOffset}
+                stroke-dasharray={isIndeterminate ? "20 200" : CIRCUMFERENCE}
+                stroke-dashoffset={isIndeterminate ? 0 : dashOffset}
                 stroke-linecap="round"
                 transform="rotate(-90 {SIZE / 2} {SIZE / 2})"
                 style="transition: stroke-dashoffset 200ms linear;"
             />
         </svg>
-        <span class="percent">{Math.round(percent)}%</span>
+        {#if !isIndeterminate}
+            <span class="percent">{Math.round(percent)}%</span>
+        {/if}
     </div>
 
     <div class="status">
         <strong>{t("finalizing")}</strong>
-        <span class="hint">{t("finalizingHint")}</span>
+        <span class="hint">
+            {isIndeterminate ? t("loadingModel") : t("finalizingHint")}
+        </span>
     </div>
 
     {#if liveText}
-        <div class="live-text"><pre>{liveText}</pre></div>
+        <div class="live-text">
+            <pre bind:this={liveTextEl}>{liveText}</pre>
+        </div>
     {/if}
 
-    <button class="btn-cancel" onclick={requestCancel}>
+    <button
+        class="btn-cancel"
+        onclick={requestCancel}
+        disabled={cancelling}
+        aria-disabled={cancelling}
+    >
         {t("cancelTranscription")}
     </button>
 </div>
 
 {#if confirming}
-    <div class="modal-backdrop" role="dialog">
-        <div class="modal">
-            <h3>{t("cancelConfirmTitle")}</h3>
-            <p>{t("cancelConfirmBody")}</p>
+    <div class="modal-backdrop">
+        <div
+            class="modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="cancel-title"
+            aria-describedby="cancel-body"
+            bind:this={dialogEl}
+        >
+            <h3 id="cancel-title">{t("cancelConfirmTitle")}</h3>
+            <p id="cancel-body">{t("cancelConfirmBody")}</p>
             <div class="modal-actions">
                 <button class="btn-secondary" onclick={dismissCancel}>
                     {t("cancelConfirmNo")}
@@ -1818,10 +2070,24 @@ git commit -m "feat(ui): nav buttons disable while a job is finalizing"
         padding: 32px;
     }
 
+    .job-label {
+        font-size: 0.9rem;
+        color: var(--text-muted);
+    }
+
     .ring-wrap {
         position: relative;
         width: 96px;
         height: 96px;
+    }
+
+    .ring-wrap.indeterminate svg {
+        animation: ring-spin 1.4s linear infinite;
+    }
+
+    @keyframes ring-spin {
+        from { transform: rotate(0deg); }
+        to { transform: rotate(360deg); }
     }
 
     .percent {
@@ -1874,9 +2140,14 @@ git commit -m "feat(ui): nav buttons disable while a job is finalizing"
         font-size: 0.9rem;
     }
 
-    .btn-cancel:hover {
+    .btn-cancel:hover:not([disabled]) {
         color: var(--accent);
         border-color: var(--accent);
+    }
+
+    .btn-cancel[disabled] {
+        opacity: 0.5;
+        cursor: wait;
     }
 
     .modal-backdrop {
@@ -1926,6 +2197,14 @@ git commit -m "feat(ui): nav buttons disable while a job is finalizing"
 </style>
 ```
 
+Component contract:
+- **`percent` 0–100**: drives the ring fill. While `percent === 0` and not cancelling, the component renders an indeterminate spinning arc + "Loading model…" hint instead of a frozen 0%.
+- **`liveText`**: optional progressive transcript. Auto-scrolls to the bottom as it grows.
+- **`cancelling`**: when true, the cancel button is disabled (and visibly waiting). Set this from the parent when `phase === "cancelling"`.
+- **`jobLabel`**: optional context line shown above the ring (e.g. "Recorded: 2m 14s" or the prefilled title) so the user remembers what they're waiting on.
+- **`onCancel`**: fires after the user confirms in the modal.
+- **Modal a11y**: `role="dialog"`, `aria-modal`, `aria-labelledby`, `aria-describedby`, focus trap on Tab/Shift-Tab, Escape dismisses, focus returns to the cancel button on close.
+
 - [ ] **Step 2: Run check**
 
 Run: `npm run check`
@@ -1947,6 +2226,8 @@ git commit -m "feat(ui): FinalizingProgress component with circular progress + c
 
 - [ ] **Step 1: Replace the entire `<script>` block**
 
+No id-filter on the event listeners: the backend enforces a single-job-at-a-time invariant (atomic `current_job` reservation in Tasks 12/13), so the frontend can correlate events to "the current job" via `phase`. This also closes the listener-race window where progress events arrived before the awaited invoke returned the new id.
+
 ```svelte
 <script>
     import { invoke } from "@tauri-apps/api/core";
@@ -1964,44 +2245,60 @@ git commit -m "feat(ui): FinalizingProgress component with circular progress + c
     let liveText = $state("");
     let elapsed = $state(0);
     let percent = $state(0);
+    let recordedDurationLabel = $state("");
     let timer = null;
-    let activeJobId = null;
 
     let unlisteners = [];
 
+    function isFinalizing() {
+        return phase === "finalizing" || phase === "cancelling";
+    }
+
     onMount(async () => {
         unlisteners.push(
+            // Live-during-recording feedback. The Rust dictation loop keeps
+            // emitting `dictation://segment` while `phase === "recording"`;
+            // once we transition to `finalizing`, the new
+            // `transcription://text` events take over.
+            await listen("dictation://segment", (event) => {
+                if (phase !== "recording") return;
+                liveText = event.payload.fullText;
+            }),
             await listen("transcription://text", (event) => {
-                if (event.payload.id !== activeJobId) return;
+                if (!isFinalizing()) return;
                 liveText = event.payload.text;
             }),
             await listen("transcription://progress", (event) => {
-                if (event.payload.id !== activeJobId) return;
+                if (!isFinalizing()) return;
                 percent = event.payload.percent;
             }),
             await listen("transcription://complete", (event) => {
-                if (event.payload.id !== activeJobId) return;
-                phase = "idle";
-                appBusy.set(false);
-                liveText = "";
-                percent = 0;
+                if (!isFinalizing()) return;
+                percent = 100;
+                // Brief moment showing 100% before disappearing.
+                setTimeout(() => {
+                    phase = "idle";
+                    appBusy.set(false);
+                    liveText = "";
+                    percent = 0;
+                    recordedDurationLabel = "";
+                }, 250);
                 onTranscribed?.(event.payload.transcription);
-                activeJobId = null;
             }),
             await listen("transcription://cancelled", (event) => {
-                if (event.payload.id !== activeJobId) return;
+                if (!isFinalizing()) return;
                 phase = "idle";
                 appBusy.set(false);
                 liveText = "";
                 percent = 0;
-                activeJobId = null;
+                recordedDurationLabel = "";
             }),
             await listen("transcription://error", (event) => {
-                if (event.payload.id !== activeJobId) return;
+                if (!isFinalizing()) return;
                 error = event.payload.error;
                 phase = "idle";
                 appBusy.set(false);
-                activeJobId = null;
+                recordedDurationLabel = "";
             }),
         );
     });
@@ -2029,19 +2326,24 @@ git commit -m "feat(ui): FinalizingProgress component with circular progress + c
         try {
             clearInterval(timer);
             timer = null;
-            const now = new Date().toLocaleString("pt-BR");
+            const now = new Date().toLocaleString(
+                locale === "pt" ? "pt-BR" : "en-US",
+            );
+            // Bridge: show the recording duration above the ring so the
+            // user keeps context for what they were dictating.
+            recordedDurationLabel = `${t("recordedDuration")} ${formatTime(elapsed)}`;
             phase = "finalizing";
             appBusy.set(true);
-            const id = await invoke("stop_dictation", {
+            await invoke("stop_dictation", {
                 title: `${t("dictation")} ${now}`,
                 language: locale,
                 durationSecs: elapsed,
             });
-            activeJobId = id;
         } catch (e) {
             error = e;
             phase = "idle";
             appBusy.set(false);
+            recordedDurationLabel = "";
         }
     }
 
@@ -2078,7 +2380,13 @@ git commit -m "feat(ui): FinalizingProgress component with circular progress + c
             <div class="live-text"><pre>{liveText}</pre></div>
         {/if}
     {:else if phase === "finalizing" || phase === "cancelling"}
-        <FinalizingProgress {percent} {liveText} onCancel={requestCancel} />
+        <FinalizingProgress
+            {percent}
+            {liveText}
+            cancelling={phase === "cancelling"}
+            jobLabel={recordedDurationLabel}
+            onCancel={requestCancel}
+        />
     {:else}
         <button class="btn-start" onclick={startDictation}>
             {t("startDictation")}
@@ -2093,27 +2401,12 @@ git commit -m "feat(ui): FinalizingProgress component with circular progress + c
 
 The existing `<style>` block can stay as-is. Remove the now-unused `.live-text` styles only if they conflict (they shouldn't — the new component owns its own `.live-text`).
 
-- [ ] **Step 3: Re-add the `dictation://segment` listener for live-recording feedback**
+- [ ] **Step 3: Verify the `dictation://segment` emit is unchanged in Rust**
 
-The old `dictation://segment` event is still emitted by the Rust dictation loop during recording (Task 12 only changed the stop path). The new `<script>` we just wrote dropped the listener for it, so the live-text box would no longer update during recording. Add the listener back, scoped to the `recording` phase only — the new `transcription://text` events take over once we transition to `finalizing`.
+The Step 1 onMount block already includes the `dictation://segment` listener (live-during-recording feedback). Confirm the Rust side still emits it with payload shape `{ fullText, ... }`:
 
-Confirm there are no other callers first:
-
-Run: `grep -rn "dictation://" src/ src-tauri/`
-Expected: only the emit in `src-tauri/src/dictation.rs`. Then add the listener:
-
-Add inside `onMount`:
-
-```js
-unlisteners.push(
-    await listen("dictation://segment", (event) => {
-        if (phase !== "recording") return;
-        liveText = event.payload.fullText;
-    }),
-);
-```
-
-This keeps backward-compat with the existing live-during-recording behavior.
+Run: `grep -rn "dictation://" src-tauri/`
+Expected: emit in `src-tauri/src/dictation.rs` is preserved (Task 12 changes the stop path but keeps the loop's mid-recording emit).
 
 - [ ] **Step 4: Run check**
 
@@ -2146,20 +2439,21 @@ import FinalizingProgress from "./FinalizingProgress.svelte";
 
 - [ ] **Step 2: Add finalizing state**
 
+The id-filter on listeners is dropped — backend enforces single-job-at-a-time, so `phase` alone is enough to correlate events. We track the `startedFromPendingId` separately so we can remove the right pending-recording row from the list on completion.
+
 Replace `let transcribingId = $state(null);` with:
 
 ```js
-let transcribingId = $state(null);
 let liveText = $state("");
 let percent = $state(0);
 let phase = $state("idle"); // "idle" | "finalizing" | "cancelling"
-let unlisteners = [];
-```
-
-Add a tracking variable above `onMount` (next to the other `let` declarations):
-
-```js
+let pendingDurationLabel = $state("");
 let startedFromPendingId = null;
+let unlisteners = [];
+
+function isFinalizing() {
+    return phase === "finalizing" || phase === "cancelling";
+}
 ```
 
 Then add to `onMount`:
@@ -2167,42 +2461,47 @@ Then add to `onMount`:
 ```js
 unlisteners.push(
     await listen("transcription://text", (event) => {
-        if (event.payload.id !== transcribingId) return;
+        if (!isFinalizing()) return;
         liveText = event.payload.text;
     }),
     await listen("transcription://progress", (event) => {
-        if (event.payload.id !== transcribingId) return;
+        if (!isFinalizing()) return;
         percent = event.payload.percent;
     }),
     await listen("transcription://complete", (event) => {
-        if (event.payload.id !== transcribingId) return;
+        if (!isFinalizing()) return;
         const t_ = event.payload.transcription;
         if (startedFromPendingId !== null) {
-            pendingRecordings = pendingRecordings.filter((p) => p.id !== startedFromPendingId);
+            pendingRecordings = pendingRecordings.filter(
+                (p) => p.id !== startedFromPendingId,
+            );
         }
-        phase = "idle";
-        appBusy.set(false);
-        liveText = "";
-        percent = 0;
-        transcribingId = null;
-        startedFromPendingId = null;
+        percent = 100;
+        setTimeout(() => {
+            phase = "idle";
+            appBusy.set(false);
+            liveText = "";
+            percent = 0;
+            pendingDurationLabel = "";
+            startedFromPendingId = null;
+        }, 250);
         onTranscribed?.(t_);
     }),
     await listen("transcription://cancelled", (event) => {
-        if (event.payload.id !== transcribingId) return;
+        if (!isFinalizing()) return;
         phase = "idle";
         appBusy.set(false);
         liveText = "";
         percent = 0;
-        transcribingId = null;
+        pendingDurationLabel = "";
         startedFromPendingId = null;
     }),
     await listen("transcription://error", (event) => {
-        if (event.payload.id !== transcribingId) return;
+        if (!isFinalizing()) return;
         error = event.payload.error;
         phase = "idle";
         appBusy.set(false);
-        transcribingId = null;
+        pendingDurationLabel = "";
         startedFromPendingId = null;
     }),
 );
@@ -2220,23 +2519,29 @@ for (const u of unlisteners) u();
 async function transcribePending(id) {
     try {
         error = "";
+        const pending = pendingRecordings.find((p) => p.id === id);
         startedFromPendingId = id;
+        if (pending && typeof pending.duration_secs === "number") {
+            pendingDurationLabel = `${t("recordedDuration")} ${formatDuration(pending.duration_secs)}`;
+        }
         phase = "finalizing";
         appBusy.set(true);
         liveText = "";
         percent = 0;
-        const now = new Date().toLocaleString("pt-BR");
-        const newId = await invoke("transcribe_pending_recording", {
+        const now = new Date().toLocaleString(
+            locale === "pt" ? "pt-BR" : "en-US",
+        );
+        await invoke("transcribe_pending_recording", {
             pendingId: id,
             title: `${t("meetingTitle")} ${now}`,
             language: locale,
         });
-        transcribingId = newId;
     } catch (e) {
         error = e;
         phase = "idle";
         appBusy.set(false);
         startedFromPendingId = null;
+        pendingDurationLabel = "";
     }
 }
 
@@ -2248,15 +2553,27 @@ async function requestCancel() {
         error = e;
     }
 }
+
+function formatDuration(secs) {
+    const m = Math.floor(secs / 60).toString().padStart(2, "0");
+    const s = Math.floor(secs % 60).toString().padStart(2, "0");
+    return `${m}:${s}`;
+}
 ```
 
 - [ ] **Step 4: Add finalizing UI to the markup**
 
-In the markup block, replace `{#if !recording && !processing && pendingRecordings.length > 0}` with `{#if phase === "finalizing" || phase === "cancelling"}` first branch, then `{:else if !recording && !processing && pendingRecordings.length > 0}`:
+In the markup block, gate the pending-list block behind `!isFinalizing()`:
 
 ```svelte
 {#if phase === "finalizing" || phase === "cancelling"}
-    <FinalizingProgress {percent} {liveText} onCancel={requestCancel} />
+    <FinalizingProgress
+        {percent}
+        {liveText}
+        cancelling={phase === "cancelling"}
+        jobLabel={pendingDurationLabel}
+        onCancel={requestCancel}
+    />
 {:else if !recording && !processing && pendingRecordings.length > 0}
     <!-- existing pending list block stays here -->
 {/if}
@@ -2311,31 +2628,39 @@ git commit -m "feat(ui): Recorder uses transcribe_pending_recording + Finalizing
 **Files:**
 - Modify: `src/lib/History.svelte`
 
+The badge is purely informational — clicking it does nothing different from clicking the row, and there is no recovery action attached. Drop the warning glyph (which implies actionability) and use a darker amber for WCAG AA contrast on the tinted background.
+
 - [ ] **Step 1: Render the badge in the title block**
 
 In the `<li>` markup, inside the `<span class="title">` block, after the existing `{#if item.summary}` block, add:
 
 ```svelte
 {#if item.status === "partial"}
-    <span class="partial-badge" title={t("partialBadge")}>⚠ {t("partialBadge")}</span>
+    <span class="partial-badge">{t("partialBadge")}</span>
 {/if}
 ```
 
 - [ ] **Step 2: Add styling for the badge**
 
-In the `<style>` block:
+`#7d5a00` on `rgba(255,193,7,0.18)` over the surface variable yields ~5:1 contrast, satisfying WCAG AA at small font sizes.
 
 ```css
 .partial-badge {
     display: inline-block;
     background: rgba(255, 193, 7, 0.18);
-    color: #ffb300;
+    color: #7d5a00;
     font-size: 0.7rem;
     font-weight: 600;
     padding: 2px 8px;
     border-radius: 10px;
     margin-left: 6px;
     vertical-align: middle;
+}
+
+@media (prefers-color-scheme: dark) {
+    .partial-badge {
+        color: #ffd54f;
+    }
 }
 ```
 
@@ -2387,198 +2712,76 @@ git commit -m "chore: bump version to 0.2.0"
 
 ---
 
-### Task 24: Manual integration testing
+### Task 24: Smoke test, lint, and PR
 
-**Files:** none modified — this task produces the test report committed in Task 25.
+This collapses what was Tasks 24–27. For a single-maintainer privacy-first desktop tool, a separate committed test-report file plus a separate release-notes file is more ceremony than the project earns. The PR description carries the same information without polluting the repo.
 
-Open a notes file `/tmp/martin-test-report.md` while doing this. Record observed times and pass/fail.
-
-- [ ] **Step 1: Build the app in dev mode**
-
-Run: `cargo tauri dev`
-Wait until the window opens.
-
-- [ ] **Step 2: Test scenario A — short dictation (10s)**
-
-1. Click "Iniciar Ditado".
-2. Speak 10 seconds of clear Portuguese ("um, dois, três, teste do martin").
-3. Click "Parar Ditado".
-4. Observe: `<FinalizingProgress>` appears, % advances, `liveText` shows the transcription.
-5. Wait for completion (≤ 60s on this dev machine).
-6. Confirm: navigates to `TranscriptionView` with the text. Status not visible yet — confirm DB row has `status = 'complete'` via:
-   ```bash
-   python3 -c "import sqlite3; con = sqlite3.connect('/home/nuuvem/.local/share/com.nuuvem.martin/martin.db'); print(list(con.execute('SELECT id, status, length(text) FROM transcriptions ORDER BY id DESC LIMIT 1')))"
-   ```
-
-Record: PASS / FAIL + observed time.
-
-- [ ] **Step 3: Test scenario B — long dictation (60s)**
-
-Same flow with 60 seconds of speech. Confirm:
-- During recording, the live-text box updates with at least one segment.
-- Stop button → finalizing screen.
-- Progress %  monotonically advances.
-- Eventually saves to history with `status = 'complete'`.
-- Nav buttons are visibly disabled during finalizing.
-
-Record: PASS / FAIL + observed time.
-
-- [ ] **Step 4: Test scenario C — Stop within 1 second**
-
-Start dictation, immediately stop. Confirm:
-- No `"No text was transcribed"` error path.
-- Finalizing screen shows briefly, then transitions to history.
-- Row exists in `transcriptions` (possibly with empty text but `status = 'complete'`).
-
-Record: PASS / FAIL.
-
-- [ ] **Step 5: Test scenario D — cancel mid-finalization**
-
-Dictate 30s, stop, click Cancelar before finalizing finishes, confirm in modal. Verify:
-- `transcription://cancelled` event arrives.
-- DB has no new row for this job.
-- Live-text disappears, returns to idle.
-
-Record: PASS / FAIL.
-
-- [ ] **Step 6: Test scenario E — pending file flow**
-
-1. Click "Gravar".
-2. Record 15s of audio. Stop.
-3. The pending recording appears below.
-4. Click "Transcrever".
-5. Observe: `<FinalizingProgress>` shows up immediately, % advances.
-6. Wait for complete. Confirm:
-   - Pending row deleted (`SELECT * FROM pending_recordings`).
-   - WAV file deleted from `~/.local/share/com.nuuvem.martin/`.
-   - Transcription appears in history.
-
-Record: PASS / FAIL.
-
-- [ ] **Step 7: Test scenario F — start while one is finalizing**
-
-While a job is finalizing, try to click "Gravar" or "Ditado" in the nav. Verify both are disabled with the tooltip.
-
-Then try invoking `start_dictation` from the JS console (DevTools): expected error "Another transcription is in progress". (Skip this if DevTools is awkward to access in the dev build; the nav guard is enough proof.)
-
-Record: PASS / FAIL.
-
-- [ ] **Step 8: Test scenario G — force kill during finalizing**
-
-1. Start a long dictation (~30s).
-2. Stop. Wait for `<FinalizingProgress>` to show ~20%.
-3. Force-kill the app: `pkill -9 martin` from a terminal.
-4. Reopen the app.
-5. Observe in History: a row appears with the partial badge.
-
-Record: PASS / FAIL.
-
----
-
-### Task 25: Commit the test report
-
-**Files:**
-- Create: `docs/specs/2026-05-03-transcription-finalizing-flow-test-report.md`
-
-- [ ] **Step 1: Write the report**
-
-Use the structure from Task 24 — list each scenario with PASS/FAIL, observed timing, and any anomalies.
-
-- [ ] **Step 2: Commit**
-
-```bash
-git add docs/specs/2026-05-03-transcription-finalizing-flow-test-report.md
-git commit -m "docs: manual test report for finalizing flow v0.2.0"
-```
-
----
-
-### Task 26: Update release notes
-
-**Files:**
-- Create: `docs/release-notes-v0.2.0.md`
-
-- [ ] **Step 1: Draft the notes**
-
-```md
-# v0.2.0 — Finalizing flow
-
-## Fixed
-- Dictation no longer loses text when Stop is pressed before whisper produces its first segment. The backend now owns the transcription text end-to-end.
-
-## Added
-- Explicit "finalizing" phase for both flows (live dictation + transcribe pending recording), with a circular progress indicator and live text.
-- Navigation menu locks while a transcription is finalizing, so users can't navigate into half-rendered states.
-- Cancel-with-confirmation: stops the running whisper inference cleanly and removes the in-progress row.
-- Partial recovery: if the app is killed mid-finalization, the partial text is kept and surfaced in History with a "Parcial" badge.
-
-## Changed
-- IPC surface: removed `transcribe_recording`; added `transcribe_pending_recording`, `cancel_job`, `current_job_status`. `stop_dictation` no longer accepts `full_text`.
-- `transcriptions` schema gains a `status` column (`complete` / `partial` / `failed`). Existing rows are migrated to `complete` automatically on first launch.
-
-## Known limitations
-- Dictation audio is held in RAM while recording; a crash during recording (before Stop) loses the audio. Tracked separately.
-- Whisper is CPU-only in this build. On slower machines (≤ 4 cores at low frequency) finalizing a long recording can take several minutes — the new progress UI makes this visible. A whisper-rs build with OpenBLAS / Vulkan acceleration is tracked as a follow-up.
-```
-
-- [ ] **Step 2: Commit**
-
-```bash
-git add docs/release-notes-v0.2.0.md
-git commit -m "docs: release notes for v0.2.0"
-```
-
----
-
-### Task 27: Final review pass and pre-PR cleanup
-
-- [ ] **Step 1: Re-run everything**
+- [ ] **Step 1: Re-run all checks**
 
 ```bash
 cd src-tauri && cargo fmt && cargo clippy -- -D warnings && cargo test --lib
 cd .. && npm run check
 ```
 
-Expected: all clean.
+Expected: all green.
 
-- [ ] **Step 2: Inspect the diff**
+- [ ] **Step 2: Run `cargo tauri dev` and walk the scenarios**
 
-Run: `git log --oneline main..HEAD`
-Expected: a clean sequence of focused commits, no fixup-style noise.
+Open the app and run through the scenarios below. Note observed wall-clock times in the PR body.
 
-Run: `git diff main..HEAD --stat`
-Expected: file changes match the file map at the top of this plan.
+| # | Scenario | Pass criteria |
+|---|---|---|
+| A | Short dictation, ~10s | FinalizingProgress shows, % advances, row saves with `status='complete'` |
+| B | Long dictation, ~60s | live-text updates during recording; stop → ring; nav: Record+Dictate locked, History remains clickable; saves complete |
+| C | Stop within 1s | no error path; row may have empty text but ends `status='complete'` (or no row if whisper produced nothing — startup sweep would catch a stranded partial) |
+| D | Cancel mid-finalize | confirmation modal opens, focus on "Voltar"; Sim cancelar → cancelled event arrives, row deleted, returns to idle |
+| E | Pending-file: record 15s → Transcrever | FinalizingProgress immediate; on complete: pending row deleted, WAV deleted, transcription in history |
+| F | Pending-file cancel | row remains, WAV remains, click Transcrever again → finalize succeeds |
+| G | Start a job while one is running | Record + Dictate aria-disabled; clicking does nothing; History still navigable; programmatic invoke returns "Another transcription is in progress" |
+| H | Force-kill mid-finalize (`pkill -9 martin`) | reopen → row with the partial badge in History; if the kill happened before any segment fired, no ghost row (swept by `delete_empty_partials`) |
+| I | Worker panic / model file missing | error event shows; nav unlocks; subsequent jobs work |
 
-- [ ] **Step 3: Open the PR**
+DB inspection helper (read-only):
+```bash
+sqlite3 ~/.local/share/com.nuuvem.martin/martin.db \
+  "SELECT id, status, substr(text,1,40), duration_secs FROM transcriptions ORDER BY id DESC LIMIT 5"
+```
 
-Push the branch:
+- [ ] **Step 3: Push and open the PR**
 
 ```bash
 git push -u origin feat/finalizing-flow
-```
 
-Open PR via `gh`:
-
-```bash
 gh pr create --title "feat: transcription finalizing flow (v0.2.0)" --body "$(cat <<'EOF'
 ## Summary
 - Fixes the dictation save bug where text was lost on slow machines.
-- Adds an explicit finalizing phase with progress + live text + cancel.
-- Locks navigation while a job is finalizing.
-- Persists partial state and surfaces it via a "Parcial" badge in History.
-- Bumps to v0.2.0; IPC commands change.
+- Adds an explicit finalizing phase with circular progress + live text + cancel.
+- Locks Record/Dictate during finalize; History stays navigable.
+- Surfaces force-kill recovery as `'partial'` rows in History; sweeps empty partials on startup.
+- Bumps to v0.2.0.
 
-## Spec
-docs/specs/2026-05-03-transcription-finalizing-flow-design.md
+## Spec / Plan
+- docs/specs/2026-05-03-transcription-finalizing-flow-design.md
+- docs/specs/2026-05-03-transcription-finalizing-flow-plan.md
 
-## Plan
-docs/specs/2026-05-03-transcription-finalizing-flow-plan.md
+## Schema migration
+- `transcriptions` gains a `status` column. ALTER TABLE on launch; existing rows backfill to `'complete'` via the column DEFAULT. SQLite WAL + `synchronous=NORMAL` enabled.
 
-## Test plan
-docs/specs/2026-05-03-transcription-finalizing-flow-test-report.md
+## Internal architecture
+- New module `src-tauri/src/transcribe/job.rs`: `TranscriptionJob`, `JobKind`, `FinalizeOutcome`, `run_finalize_dictation`, `run_finalize_pending_file`, `finish_job`.
+- `DictationSession` now owns a `JoinHandle` for its transcription loop; `stop_dictation` joins it before draining the audio buffer.
+- New events on `transcription://*`: `text`, `progress`, `complete`, `cancelled`, `error`.
+- IPC: removed `transcribe_recording`; added `transcribe_pending_recording`, `cancel_job`. `stop_dictation` no longer accepts `full_text`.
 
-## Migration
-- The `transcriptions` table gains a `status` column. Migration is idempotent on launch.
+## Smoke test results
+| Scenario | Result | Notes |
+|---|---|---|
+| A short dictation | … | … |
+| … | … | … |
+
+## Known limitations carried forward
+- Dictation audio is in RAM during recording; a crash before Stop loses it. Tracked separately.
+- CPU-only whisper on slower machines can take minutes to finalize. The new progress UI makes this visible; an OpenBLAS/Vulkan build is a follow-up.
 EOF
 )"
 ```
@@ -2591,7 +2794,14 @@ The plan author has already run this once. The executing engineer should re-veri
 
 - [ ] Every spec section maps to at least one task. (See File map above.)
 - [ ] No "TBD" or "implement later" lines in any step.
-- [ ] Type and method names used in later tasks match what was defined earlier (`Transcription.status`, `Store::insert_partial`, `Store::update_text`, `Store::mark_complete`, `Store::reset_partial_on_startup`, `Transcriber::transcribe_with_callbacks`, `TranscriptionJob`, `JobKind`, `FinalizeOutcome`, `run_finalize_dictation`, `run_finalize_pending_file`, `finish_job`, `cancel_job`, `current_job_status`, `transcribe_pending_recording`, `appBusy`, `FinalizingProgress`).
-- [ ] Frontend listens to all five `transcription://*` events that the backend emits.
-- [ ] Cancel cleanup matches spec: dictation deletes DB row; pending-file deletes DB row + WAV but keeps `pending_recordings` row.
-- [ ] Migration is idempotent (Task 1 test asserts this).
+- [ ] Type and method names used in later tasks match what was defined earlier (`Transcription.status`, `Store::insert_partial`, `Store::update_text`, `Store::mark_complete`, `Store::delete_empty_partials`, `Transcriber::transcribe_with_callbacks`, `TranscriptionJob`, `JobKind`, `FinalizeOutcome`, `ErrorPayload`, `run_finalize_dictation`, `run_finalize_pending_file`, `finish_job`, `cancel_job`, `transcribe_pending_recording`, `appBusy`, `FinalizingProgress`).
+- [ ] Frontend listens to all five `transcription://*` events that the backend emits, plus `dictation://segment` for live-during-recording feedback.
+- [ ] Cancel cleanup: dictation deletes DB row; pending-file deletes DB row only and leaves WAV + `pending_recordings` row intact so retry works.
+- [ ] Migration is idempotent and backfills existing rows to `'complete'` (Task 1 has tests for both).
+- [ ] `current_job` is cleared and `transcriber` is restored to the cache **before** `finish_job` emits its terminal event.
+- [ ] Worker bodies are wrapped in `catch_unwind`; on panic, `current_job` is cleared and `transcription://error` is emitted with the typed `ErrorPayload`.
+- [ ] DictationSession's `JoinHandle` is joined before the audio buffer is drained.
+- [ ] `state.transcriber.lock().take()` only happens AFTER joining the live dictation worker (so the cache holds the transcriber, no double-load).
+- [ ] No frontend listener filters by job id — single-job invariant is enforced backend-side.
+- [ ] No `keepPartial`/`discardPartial`/`current_job_status` references anywhere (dropped during review).
+- [ ] No `'failed'` status value referenced anywhere — vocabulary is `'complete'` and `'partial'` only.
