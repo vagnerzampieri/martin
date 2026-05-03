@@ -240,6 +240,74 @@ pub fn run_finalize_pending_file(
     )
 }
 
+#[derive(Clone, Serialize)]
+struct CompletePayload {
+    id: i64,
+    transcription: crate::db::store::Transcription,
+}
+
+/// Apply the terminal effect of a finalize run to the DB and the filesystem,
+/// then emit the matching event. The caller is responsible for clearing
+/// `current_job` from `AppState` BEFORE calling `finish_job` so that any
+/// frontend handler reacting to the emitted terminal event can immediately
+/// initiate a new job without seeing a stale `current_job` reservation.
+pub fn finish_job(
+    job: TranscriptionJob,
+    outcome: FinalizeOutcome,
+    store: Arc<Mutex<Store>>,
+    app_handle: AppHandle,
+) {
+    let id = job.id;
+    match outcome {
+        FinalizeOutcome::Complete {
+            final_text,
+            duration_secs,
+        } => {
+            if let Ok(s) = store.lock() {
+                let _ = s.update_text(id, &final_text, duration_secs);
+                let _ = s.mark_complete(id);
+
+                if let JobKind::PendingFile {
+                    wav_path,
+                    pending_id,
+                } = &job.kind
+                {
+                    if let Err(e) = std::fs::remove_file(wav_path) {
+                        eprintln!("[finish_job] failed to remove WAV {:?}: {}", wav_path, e);
+                    }
+                    let _ = s.delete_pending(*pending_id);
+                }
+
+                if let Ok(t) = s.get(id) {
+                    let _ = app_handle.emit(
+                        "transcription://complete",
+                        CompletePayload {
+                            id,
+                            transcription: t,
+                        },
+                    );
+                }
+            }
+        }
+        FinalizeOutcome::Cancelled => {
+            if let Ok(s) = store.lock() {
+                // Cancel = discard everything. The transcription row, if
+                // any, is removed. For pending-file kind we leave BOTH the
+                // WAV and the pending_recordings row untouched so the user
+                // can simply click Transcrever again.
+                let _ = s.delete(id);
+            }
+            let _ = app_handle.emit("transcription://cancelled", CancelledPayload { id });
+        }
+        FinalizeOutcome::Error(err) => {
+            // Row stays partial (status='partial') with whatever the
+            // debounced segment callback persisted. The user sees it in
+            // History via the partial badge — same shape as crash recovery.
+            let _ = app_handle.emit("transcription://error", ErrorPayload { id, error: err });
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
