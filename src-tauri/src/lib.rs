@@ -8,7 +8,7 @@ mod transcribe;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State};
 
 use audio::capture::{finalize_recording, AudioCapture};
 use db::store::{PendingRecording, Store, Transcription};
@@ -33,7 +33,6 @@ pub struct AppState {
     store: std::sync::Arc<Mutex<Store>>,
     transcriber: Mutex<Option<Transcriber>>,
     data_dir: PathBuf,
-    #[allow(dead_code)]
     current_job: Mutex<Option<TranscriptionJob>>,
 }
 
@@ -85,6 +84,16 @@ fn get_or_create_transcriber(
         Some(t) => Ok(t),
         None => Transcriber::new(model_path),
     }
+}
+
+fn clear_current_job_and_emit_error(app: &tauri::AppHandle, job_id: i64, error: String) {
+    if let Some(s) = app.try_state::<AppState>() {
+        let _ = s.current_job.lock().map(|mut g| *g = None);
+    }
+    let _ = app.emit(
+        "transcription://error",
+        crate::transcribe::job::ErrorPayload { id: job_id, error },
+    );
 }
 
 #[tauri::command]
@@ -225,8 +234,8 @@ async fn start_dictation(
     }
 
     let data_dir = state.data_dir.clone();
-    let app = app_handle.clone();
-    tauri::async_runtime::spawn_blocking(move || model::ensure_model(&data_dir, &app))
+    let app_for_model = app_handle.clone();
+    tauri::async_runtime::spawn_blocking(move || model::ensure_model(&data_dir, &app_for_model))
         .await
         .map_err(|e| format!("Model check failed: {}", e))??;
 
@@ -237,45 +246,37 @@ async fn start_dictation(
     let running = session.running_flag();
     let source_rate = session.source_rate();
     let channels = session.channels();
-
-    *state.dictation.lock().map_err(|e| e.to_string())? = Some(session);
+    let committed_out = session.committed();
+    let last_full_text_out = session.last_full_text();
 
     let model_path = model::model_path(&state.data_dir);
     let cached = state.transcriber.lock().map_err(|e| e.to_string())?.take();
 
-    tauri::async_runtime::spawn(async move {
-        let handle = app_handle.clone();
-        let result = tauri::async_runtime::spawn_blocking(move || {
-            let transcriber = match get_or_create_transcriber(cached, &model_path) {
-                Ok(t) => t,
-                Err(e) => {
-                    eprintln!("Failed to create transcriber: {}", e);
-                    return (None, Vec::new());
-                }
-            };
+    let transcriber = get_or_create_transcriber(cached, &model_path)?;
 
-            let segments = dictation::run_transcription_loop(
-                buffer,
-                running,
-                &transcriber,
-                &language,
-                source_rate,
-                channels,
-                handle,
-            );
+    let app_for_loop = app_handle.clone();
+    let language_owned = language.clone();
+    let worker = std::thread::spawn(move || {
+        dictation::run_transcription_loop(
+            buffer,
+            running,
+            committed_out,
+            last_full_text_out,
+            &transcriber,
+            &language_owned,
+            source_rate,
+            channels,
+            app_for_loop.clone(),
+        );
 
-            (Some(transcriber), segments)
-        })
-        .await;
-
-        if let Ok((Some(transcriber), _)) = result {
-            let app_state = app_handle.state::<AppState>();
-            let _ = app_state
-                .transcriber
-                .lock()
-                .map(|mut guard| *guard = Some(transcriber));
+        if let Some(s) = app_for_loop.try_state::<AppState>() {
+            let _ = s.transcriber.lock().map(|mut g| *g = Some(transcriber));
         }
     });
+
+    session.set_worker(worker);
+
+    *state.dictation.lock().map_err(|e| e.to_string())? = Some(session);
 
     Ok(())
 }
@@ -283,39 +284,113 @@ async fn start_dictation(
 #[tauri::command]
 async fn stop_dictation(
     state: State<'_, AppState>,
+    app_handle: tauri::AppHandle,
     title: String,
-    full_text: String,
     language: String,
     duration_secs: f64,
-) -> Result<Transcription, String> {
-    {
-        let mut guard = state.dictation.lock().map_err(|e| e.to_string())?;
-        if let Some(ref mut session) = *guard {
-            session.stop();
-        } else {
-            return Err("No dictation in progress".to_string());
+) -> Result<i64, String> {
+    use crate::transcribe::job::{finish_job, run_finalize_dictation, JobKind, TranscriptionJob};
+    use std::panic::AssertUnwindSafe;
+
+    let mut dictation_guard = state.dictation.lock().map_err(|e| e.to_string())?;
+    let session = dictation_guard.as_mut().ok_or("No dictation in progress")?;
+
+    let mut job_guard = state.current_job.lock().map_err(|e| e.to_string())?;
+    if job_guard.is_some() {
+        return Err("Another transcription is in progress".to_string());
+    }
+
+    session.stop_and_join();
+
+    let samples = session.drain_buffer();
+    let last_full = session
+        .last_full_text()
+        .lock()
+        .map(|s| s.clone())
+        .unwrap_or_default();
+    let committed_prefix = if !last_full.trim().is_empty() {
+        last_full.trim().to_string()
+    } else {
+        session
+            .committed()
+            .lock()
+            .map(|c| c.join(" ").trim().to_string())
+            .unwrap_or_default()
+    };
+
+    *dictation_guard = None;
+    drop(dictation_guard);
+
+    let id = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        let new_id = store.insert_partial(&title, &language)?;
+        if !committed_prefix.is_empty() {
+            store.update_text(new_id, &committed_prefix, duration_secs)?;
         }
-    }
+        new_id
+    };
 
-    // Brief wait for transcription thread to process remaining audio
-    tauri::async_runtime::spawn(async {
-        std::thread::sleep(std::time::Duration::from_millis(500));
-    })
-    .await
-    .map_err(|e| format!("Wait failed: {}", e))?;
+    let mut job = TranscriptionJob::new(id, JobKind::Dictation);
+    job.committed_text = committed_prefix;
+    let job_id = job.id;
 
-    {
-        let mut guard = state.dictation.lock().map_err(|e| e.to_string())?;
-        *guard = None;
-    }
+    *job_guard = Some(job.clone());
+    drop(job_guard);
 
-    if full_text.trim().is_empty() {
-        return Err("No text was transcribed".to_string());
-    }
+    let store_for_worker = state.store.clone();
+    let app = app_handle.clone();
+    let transcriber_taken = state.transcriber.lock().map_err(|e| e.to_string())?.take();
+    let model_path = crate::model::model_path(&state.data_dir);
 
-    let store = state.store.lock().map_err(|e| e.to_string())?;
-    let id = store.save(&title, &full_text, &language, duration_secs)?;
-    store.get(id)
+    std::thread::spawn(move || {
+        let transcriber = match transcriber_taken {
+            Some(t) => t,
+            None => match Transcriber::new(&model_path) {
+                Ok(t) => t,
+                Err(e) => {
+                    clear_current_job_and_emit_error(&app, job_id, e);
+                    return;
+                }
+            },
+        };
+
+        let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            let outcome = run_finalize_dictation(
+                &job,
+                &transcriber,
+                samples,
+                duration_secs,
+                language,
+                store_for_worker.clone(),
+                app.clone(),
+            );
+            (job, outcome)
+        }));
+
+        let (job, outcome) = match result {
+            Ok(t) => t,
+            Err(_panic) => {
+                clear_current_job_and_emit_error(
+                    &app,
+                    job_id,
+                    "Transcription worker panicked".to_string(),
+                );
+                if let Some(s) = app.try_state::<AppState>() {
+                    let _ = s.transcriber.lock().map(|mut g| *g = Some(transcriber));
+                }
+                return;
+            }
+        };
+
+        if let Some(s) = app.try_state::<AppState>() {
+            let _ = s.transcriber.lock().map(|mut g| *g = Some(transcriber));
+            let _ = s.current_job.lock().map(|mut g| *g = None);
+        }
+
+        finish_job(job, outcome, store_for_worker, app);
+    });
+
+    Ok(id)
 }
 
 #[tauri::command]

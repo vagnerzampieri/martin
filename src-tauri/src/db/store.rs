@@ -93,7 +93,6 @@ impl Store {
         Ok(self.conn.last_insert_rowid())
     }
 
-    #[allow(dead_code)]
     pub fn insert_partial(&self, title: &str, language: &str) -> Result<i64, String> {
         self.conn
             .execute(
@@ -104,7 +103,6 @@ impl Store {
         Ok(self.conn.last_insert_rowid())
     }
 
-    #[allow(dead_code)]
     pub fn update_text(&self, id: i64, text: &str, duration_secs: f64) -> Result<(), String> {
         let affected = self
             .conn
