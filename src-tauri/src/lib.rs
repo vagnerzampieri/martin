@@ -467,6 +467,15 @@ async fn stop_dictation(
 }
 
 #[tauri::command]
+fn cancel_job(state: State<'_, AppState>) -> Result<(), String> {
+    let guard = state.current_job.lock().map_err(|e| e.to_string())?;
+    if let Some(job) = guard.as_ref() {
+        job.cancel();
+    }
+    Ok(())
+}
+
+#[tauri::command]
 fn check_model_exists(state: State<'_, AppState>) -> bool {
     model::model_exists(&state.data_dir)
 }
@@ -520,6 +529,7 @@ pub fn run() {
             start_recording,
             stop_recording,
             transcribe_pending_recording,
+            cancel_job,
             list_transcriptions,
             get_transcription,
             delete_transcription,
