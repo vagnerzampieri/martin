@@ -30,6 +30,11 @@ impl Store {
         let conn =
             Connection::open(db_path).map_err(|e| format!("Failed to open database: {}", e))?;
 
+        conn.pragma_update(None, "journal_mode", "WAL")
+            .map_err(|e| format!("Failed to set WAL mode: {}", e))?;
+        conn.pragma_update(None, "synchronous", "NORMAL")
+            .map_err(|e| format!("Failed to set synchronous mode: {}", e))?;
+
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS transcriptions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -52,6 +57,17 @@ impl Store {
             );",
         )
         .map_err(|e| format!("Failed to create pending_recordings table: {}", e))?;
+
+        let migration_result = conn.execute(
+            "ALTER TABLE transcriptions ADD COLUMN status TEXT NOT NULL DEFAULT 'complete'",
+            [],
+        );
+        match migration_result {
+            Ok(_) => {}
+            Err(rusqlite::Error::SqliteFailure(_, Some(msg)))
+                if msg.contains("duplicate column name") => {}
+            Err(e) => return Err(format!("Failed to add status column: {}", e)),
+        }
 
         Ok(Self { conn })
     }
@@ -493,5 +509,66 @@ mod tests {
 
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("not found"));
+    }
+
+    #[test]
+    fn new_runs_migration_idempotently() {
+        let temp_file = NamedTempFile::new().expect("temp file");
+        let path = temp_file.path().to_path_buf();
+
+        let _ = Store::new(&path).expect("first open");
+
+        let store = Store::new(&path).expect("second open");
+
+        let id = store.save("t", "x", "pt", 1.0).expect("save");
+        let row: String = store
+            .conn
+            .query_row(
+                "SELECT status FROM transcriptions WHERE id = ?1",
+                rusqlite::params![id],
+                |r| r.get(0),
+            )
+            .expect("query");
+        assert_eq!(row, "complete");
+    }
+
+    #[test]
+    fn migration_backfills_existing_rows_with_complete_status() {
+        let temp_file = NamedTempFile::new().expect("temp file");
+        let path = temp_file.path().to_path_buf();
+
+        {
+            let conn = rusqlite::Connection::open(&path).expect("open raw");
+            conn.execute(
+                "CREATE TABLE transcriptions (
+                    id INTEGER PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    text TEXT NOT NULL,
+                    language TEXT NOT NULL,
+                    duration_secs REAL NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    summary TEXT
+                )",
+                [],
+            )
+            .expect("create v0.1.0 schema");
+            conn.execute(
+                "INSERT INTO transcriptions (title, text, language, duration_secs) VALUES ('old1', 'a', 'pt', 1.0), ('old2', 'b', 'en', 2.0)",
+                [],
+            )
+            .expect("seed");
+        }
+
+        let store = Store::new(&path).expect("upgrade open");
+        let rows: Vec<String> = store
+            .conn
+            .prepare("SELECT status FROM transcriptions ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|s| s == "complete"));
     }
 }
