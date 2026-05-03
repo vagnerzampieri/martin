@@ -93,6 +93,17 @@ impl Store {
         Ok(self.conn.last_insert_rowid())
     }
 
+    #[allow(dead_code)]
+    pub fn insert_partial(&self, title: &str, language: &str) -> Result<i64, String> {
+        self.conn
+            .execute(
+                "INSERT INTO transcriptions (title, text, language, duration_secs, status) VALUES (?1, '', ?2, 0.0, 'partial')",
+                params![title, language],
+            )
+            .map_err(|e| format!("Failed to insert partial transcription: {}", e))?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
     pub fn list(&self) -> Result<Vec<Transcription>, String> {
         let mut stmt = self
             .conn
@@ -553,6 +564,20 @@ mod tests {
         let rows = store.list().expect("list");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].status, "complete");
+    }
+
+    #[test]
+    fn insert_partial_creates_row_with_status_partial() {
+        let (store, _temp_file) = create_temp_store();
+        let id = store
+            .insert_partial("Dictation", "pt")
+            .expect("insert_partial");
+        let t = store.get(id).expect("get");
+        assert_eq!(t.title, "Dictation");
+        assert_eq!(t.text, "");
+        assert_eq!(t.language, "pt");
+        assert_eq!(t.duration_secs, 0.0);
+        assert_eq!(t.status, "partial");
     }
 
     #[test]
