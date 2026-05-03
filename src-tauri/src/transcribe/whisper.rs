@@ -79,6 +79,63 @@ impl Transcriber {
         Ok(segments.join(" ").trim().to_string())
     }
 
+    /// Transcribe samples while emitting progress, per-segment text, and
+    /// observing an abort flag. Caller closures must be `Send + 'static`.
+    ///
+    /// - `on_progress` is called with whisper's internal progress (0-100).
+    /// - `on_segment` is called with each new segment text as it is produced.
+    /// - `should_abort` is polled by whisper periodically; returning true
+    ///   aborts inference cleanly.
+    // Wired in by Task 8 (run_finalize_dictation).
+    #[allow(dead_code)]
+    pub fn transcribe_with_callbacks<P, S, A>(
+        &self,
+        samples: &[f32],
+        language: &str,
+        on_progress: P,
+        mut on_segment: S,
+        should_abort: A,
+    ) -> Result<String, String>
+    where
+        P: FnMut(i32) + Send + 'static,
+        S: FnMut(&str) + Send + 'static,
+        A: FnMut() -> bool + Send + 'static,
+    {
+        let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+        params.set_language(Some(language));
+        params.set_print_special(false);
+        params.set_print_progress(false);
+        params.set_print_realtime(false);
+        params.set_print_timestamps(false);
+        params.set_no_context(true);
+
+        params.set_progress_callback_safe(on_progress);
+        params.set_segment_callback_safe_lossy(move |data: whisper_rs::SegmentCallbackData| {
+            on_segment(&data.text);
+        });
+        params.set_abort_callback_safe(should_abort);
+
+        let mut state = self
+            .ctx
+            .create_state()
+            .map_err(|e| format!("Failed to create state: {}", e))?;
+
+        state
+            .full(params, samples)
+            .map_err(|e| format!("Transcription failed: {}", e))?;
+
+        let num_segments = state
+            .full_n_segments()
+            .map_err(|e| format!("Failed to get segments: {}", e))?;
+
+        let segments: Vec<String> = (0..num_segments)
+            .map(|i| state.full_get_segment_text(i))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("Failed to extract segment text: {}", e))?;
+
+        Ok(segments.join(" ").trim().to_string())
+    }
+
     fn load_wav_as_mono_f32(path: &Path) -> Result<Vec<f32>, String> {
         let mut reader =
             hound::WavReader::open(path).map_err(|e| format!("Failed to open WAV: {}", e))?;
@@ -303,5 +360,15 @@ mod tests {
         // Verify the params are correctly constructed.
         let _params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
         assert!(!samples.is_empty());
+    }
+
+    #[test]
+    fn transcribe_with_callbacks_signature_compiles() {
+        // Compile-time-only test: ensures the public signature is shaped correctly.
+        fn _sig_check(t: &Transcriber, samples: &[f32]) {
+            let _ =
+                t.transcribe_with_callbacks(samples, "pt", |_p: i32| {}, |_seg: &str| {}, || false);
+        }
+        let _ = _sig_check;
     }
 }
