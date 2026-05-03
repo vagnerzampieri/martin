@@ -74,6 +74,9 @@
                             {#if item.summary}
                                 <span class="summary-badge" title={t("summary")}>S</span>
                             {/if}
+                            {#if item.status === "partial"}
+                                <span class="partial-badge">{t("partialBadge")}</span>
+                            {/if}
                         </span>
                         <span class="meta">
                             {formatDate(item.created_at)} · {formatDuration(item.duration_secs)}
@@ -162,6 +165,24 @@
         border-radius: 50%;
         margin-left: 6px;
         vertical-align: middle;
+    }
+
+    .partial-badge {
+        display: inline-block;
+        background: rgba(255, 193, 7, 0.18);
+        color: #7d5a00;
+        font-size: 0.7rem;
+        font-weight: 600;
+        padding: 2px 8px;
+        border-radius: 10px;
+        margin-left: 6px;
+        vertical-align: middle;
+    }
+
+    @media (prefers-color-scheme: dark) {
+        .partial-badge {
+            color: #ffd54f;
+        }
     }
 
     .summarize {
