@@ -104,6 +104,36 @@ impl Store {
         Ok(self.conn.last_insert_rowid())
     }
 
+    #[allow(dead_code)]
+    pub fn update_text(&self, id: i64, text: &str, duration_secs: f64) -> Result<(), String> {
+        let affected = self
+            .conn
+            .execute(
+                "UPDATE transcriptions SET text = ?1, duration_secs = ?2 WHERE id = ?3",
+                params![text, duration_secs, id],
+            )
+            .map_err(|e| format!("Failed to update text: {}", e))?;
+        if affected == 0 {
+            return Err(format!("Transcription with id {} not found", id));
+        }
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    pub fn mark_complete(&self, id: i64) -> Result<(), String> {
+        let affected = self
+            .conn
+            .execute(
+                "UPDATE transcriptions SET status = 'complete' WHERE id = ?1",
+                params![id],
+            )
+            .map_err(|e| format!("Failed to mark complete: {}", e))?;
+        if affected == 0 {
+            return Err(format!("Transcription with id {} not found", id));
+        }
+        Ok(())
+    }
+
     pub fn list(&self) -> Result<Vec<Transcription>, String> {
         let mut stmt = self
             .conn
@@ -578,6 +608,41 @@ mod tests {
         assert_eq!(t.language, "pt");
         assert_eq!(t.duration_secs, 0.0);
         assert_eq!(t.status, "partial");
+    }
+
+    #[test]
+    fn update_text_overwrites_text_and_duration() {
+        let (store, _temp_file) = create_temp_store();
+        let id = store.insert_partial("t", "pt").expect("insert");
+
+        store.update_text(id, "first chunk", 5.0).expect("update");
+        let row = store.get(id).expect("get");
+        assert_eq!(row.text, "first chunk");
+        assert_eq!(row.duration_secs, 5.0);
+        assert_eq!(row.status, "partial");
+
+        store
+            .update_text(id, "first chunk and more", 12.0)
+            .expect("update");
+        let row = store.get(id).expect("get");
+        assert_eq!(row.text, "first chunk and more");
+        assert_eq!(row.duration_secs, 12.0);
+    }
+
+    #[test]
+    fn update_text_returns_err_for_missing_id() {
+        let (store, _temp_file) = create_temp_store();
+        let err = store.update_text(999, "x", 1.0).unwrap_err();
+        assert!(err.contains("not found"));
+    }
+
+    #[test]
+    fn mark_complete_flips_status() {
+        let (store, _temp_file) = create_temp_store();
+        let id = store.insert_partial("t", "pt").expect("insert");
+        store.mark_complete(id).expect("mark");
+        let row = store.get(id).expect("get");
+        assert_eq!(row.status, "complete");
     }
 
     #[test]
