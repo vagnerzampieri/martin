@@ -136,7 +136,7 @@ impl Transcriber {
         Ok(segments.join(" ").trim().to_string())
     }
 
-    fn load_wav_as_mono_f32(path: &Path) -> Result<Vec<f32>, String> {
+    pub fn load_wav_as_mono_f32(path: &Path) -> Result<Vec<f32>, String> {
         let mut reader =
             hound::WavReader::open(path).map_err(|e| format!("Failed to open WAV: {}", e))?;
 
@@ -200,6 +200,12 @@ impl Transcriber {
 
         output
     }
+}
+
+pub fn wav_duration_secs(path: &Path) -> Result<f64, String> {
+    let reader = hound::WavReader::open(path).map_err(|e| format!("Failed to read WAV: {}", e))?;
+    let spec = reader.spec();
+    Ok(reader.duration() as f64 / spec.sample_rate as f64)
 }
 
 #[cfg(test)]

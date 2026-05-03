@@ -208,6 +208,38 @@ pub fn run_finalize_dictation(
     }
 }
 
+/// Loads the WAV at `wav_path` then runs the same finalize loop as the
+/// dictation worker. On success, the caller is responsible for deleting
+/// the WAV and the matching `pending_recordings` row.
+pub fn run_finalize_pending_file(
+    job: &TranscriptionJob,
+    transcriber: &Transcriber,
+    wav_path: &std::path::Path,
+    language: String,
+    store: Arc<Mutex<Store>>,
+    app_handle: AppHandle,
+) -> FinalizeOutcome {
+    let samples = match Transcriber::load_wav_as_mono_f32(wav_path) {
+        Ok(s) => s,
+        Err(e) => return FinalizeOutcome::Error(format!("Failed to read WAV: {}", e)),
+    };
+
+    let duration_secs = match crate::transcribe::whisper::wav_duration_secs(wav_path) {
+        Ok(d) => d,
+        Err(e) => return FinalizeOutcome::Error(format!("Failed to read WAV duration: {}", e)),
+    };
+
+    run_finalize_dictation(
+        job,
+        transcriber,
+        samples,
+        duration_secs,
+        language,
+        store,
+        app_handle,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

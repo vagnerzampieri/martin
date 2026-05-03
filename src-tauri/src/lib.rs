@@ -66,18 +66,12 @@ async fn stop_recording(state: State<'_, AppState>) -> Result<PendingRecording, 
         .await
         .map_err(|e| format!("Recording finalization failed: {}", e))??;
 
-    let duration_secs = wav_duration_secs(&output_path)?;
+    let duration_secs = transcribe::whisper::wav_duration_secs(&output_path)?;
     let file_path = output_path.to_string_lossy().to_string();
 
     let store = state.store.lock().map_err(|e| e.to_string())?;
     let id = store.save_pending(&file_path, duration_secs)?;
     store.get_pending(id)
-}
-
-fn wav_duration_secs(path: &std::path::Path) -> Result<f64, String> {
-    let reader = hound::WavReader::open(path).map_err(|e| format!("Failed to read WAV: {}", e))?;
-    let spec = reader.spec();
-    Ok(reader.duration() as f64 / spec.sample_rate as f64)
 }
 
 fn get_or_create_transcriber(
@@ -126,7 +120,7 @@ async fn transcribe_recording(
         move || -> Result<(String, f64, Transcriber), String> {
             let transcriber = get_or_create_transcriber(cached, &model_path)?;
             let text = transcriber.transcribe(&audio, &lang)?;
-            let duration_secs = wav_duration_secs(&audio)?;
+            let duration_secs = transcribe::whisper::wav_duration_secs(&audio)?;
             Ok((text, duration_secs, transcriber))
         },
     )
