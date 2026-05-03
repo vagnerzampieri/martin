@@ -1,8 +1,11 @@
 <script>
     import { invoke } from "@tauri-apps/api/core";
+    import { listen } from "@tauri-apps/api/event";
     import { onMount, onDestroy } from "svelte";
     import { t, locale } from "./i18n.js";
     import { formatDate, formatDuration } from "./format.js";
+    import { appBusy } from "./appBusy.js";
+    import FinalizingProgress from "./FinalizingProgress.svelte";
 
     let { onTranscribed } = $props();
 
@@ -13,10 +16,74 @@
     let timer = null;
 
     let pendingRecordings = $state([]);
-    let transcribingId = $state(null);
 
-    onMount(loadPending);
-    onDestroy(() => { if (timer) clearInterval(timer); });
+    let liveText = $state("");
+    let percent = $state(0);
+    /** "idle" | "finalizing" | "cancelling" */
+    let phase = $state("idle");
+    let pendingDurationLabel = $state("");
+    let startedFromPendingId = null;
+    let unlisteners = [];
+
+    function isFinalizing() {
+        return phase === "finalizing" || phase === "cancelling";
+    }
+
+    onMount(async () => {
+        await loadPending();
+
+        unlisteners.push(
+            await listen("transcription://text", (event) => {
+                if (!isFinalizing()) return;
+                liveText = event.payload.text;
+            }),
+            await listen("transcription://progress", (event) => {
+                if (!isFinalizing()) return;
+                percent = event.payload.percent;
+            }),
+            await listen("transcription://complete", (event) => {
+                if (!isFinalizing()) return;
+                const transcription = event.payload.transcription;
+                if (startedFromPendingId !== null) {
+                    pendingRecordings = pendingRecordings.filter(
+                        (p) => p.id !== startedFromPendingId,
+                    );
+                }
+                percent = 100;
+                setTimeout(() => {
+                    phase = "idle";
+                    appBusy.set(false);
+                    liveText = "";
+                    percent = 0;
+                    pendingDurationLabel = "";
+                    startedFromPendingId = null;
+                }, 250);
+                onTranscribed?.(transcription);
+            }),
+            await listen("transcription://cancelled", (_event) => {
+                if (!isFinalizing()) return;
+                phase = "idle";
+                appBusy.set(false);
+                liveText = "";
+                percent = 0;
+                pendingDurationLabel = "";
+                startedFromPendingId = null;
+            }),
+            await listen("transcription://error", (event) => {
+                if (!isFinalizing()) return;
+                error = event.payload.error;
+                phase = "idle";
+                appBusy.set(false);
+                pendingDurationLabel = "";
+                startedFromPendingId = null;
+            }),
+        );
+    });
+
+    onDestroy(() => {
+        if (timer) clearInterval(timer);
+        for (const u of unlisteners) u();
+    });
 
     async function loadPending() {
         try {
@@ -56,19 +123,38 @@
     async function transcribePending(id) {
         try {
             error = "";
-            transcribingId = id;
-            const now = new Date().toLocaleString("pt-BR");
-            const result = await invoke("transcribe_recording", {
+            const pending = pendingRecordings.find((p) => p.id === id);
+            startedFromPendingId = id;
+            if (pending && typeof pending.duration_secs === "number") {
+                pendingDurationLabel = `${t("recordedDuration")} ${formatDuration(pending.duration_secs)}`;
+            }
+            phase = "finalizing";
+            appBusy.set(true);
+            liveText = "";
+            percent = 0;
+            const now = new Date().toLocaleString(
+                locale === "pt" ? "pt-BR" : "en-US",
+            );
+            await invoke("transcribe_pending_recording", {
                 pendingId: id,
                 title: `${t("meetingTitle")} ${now}`,
                 language: locale,
             });
-            pendingRecordings = pendingRecordings.filter((p) => p.id !== id);
-            onTranscribed?.(result);
         } catch (e) {
             error = e;
-        } finally {
-            transcribingId = null;
+            phase = "idle";
+            appBusy.set(false);
+            startedFromPendingId = null;
+            pendingDurationLabel = "";
+        }
+    }
+
+    async function requestCancel() {
+        try {
+            phase = "cancelling";
+            await invoke("cancel_job");
+        } catch (e) {
+            error = e;
         }
     }
 
@@ -102,7 +188,7 @@
         <div class="status processing">
             {t("processingAudio")}
         </div>
-    {:else}
+    {:else if phase === "idle"}
         <button class="btn-start" onclick={startRecording}>
             {t("startRecording")}
         </button>
@@ -112,7 +198,15 @@
         <div class="error">{error}</div>
     {/if}
 
-    {#if !recording && !processing && pendingRecordings.length > 0}
+    {#if phase === "finalizing" || phase === "cancelling"}
+        <FinalizingProgress
+            {percent}
+            {liveText}
+            cancelling={phase === "cancelling"}
+            jobLabel={pendingDurationLabel}
+            onCancel={requestCancel}
+        />
+    {:else if !recording && !processing && pendingRecordings.length > 0}
         <div class="pending">
             <h3>{t("pendingRecordings")}</h3>
             <ul>
@@ -122,26 +216,20 @@
                             <span class="pending-date">{formatDate(pending.created_at)}</span>
                             <span class="pending-duration">{formatDuration(pending.duration_secs)}</span>
                         </div>
-                        {#if transcribingId === pending.id}
-                            <div class="pending-transcribing">
-                                {t("transcribing")}
-                            </div>
-                        {:else}
-                            <div class="pending-actions">
-                                <button
-                                    class="btn-transcribe"
-                                    onclick={() => transcribePending(pending.id)}
-                                >
-                                    {t("transcribe")}
-                                </button>
-                                <button
-                                    class="btn-delete"
-                                    onclick={() => deletePending(pending.id)}
-                                >
-                                    ×
-                                </button>
-                            </div>
-                        {/if}
+                        <div class="pending-actions">
+                            <button
+                                class="btn-transcribe"
+                                onclick={() => transcribePending(pending.id)}
+                            >
+                                {t("transcribe")}
+                            </button>
+                            <button
+                                class="btn-delete"
+                                onclick={() => deletePending(pending.id)}
+                            >
+                                ×
+                            </button>
+                        </div>
                     </li>
                 {/each}
             </ul>
@@ -248,12 +336,6 @@
     .pending-duration {
         font-size: 0.8rem;
         color: var(--text-muted);
-    }
-
-    .pending-transcribing {
-        font-size: 0.8rem;
-        color: var(--text-muted);
-        white-space: nowrap;
     }
 
     .pending-actions {
