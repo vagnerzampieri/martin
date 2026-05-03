@@ -14,6 +14,7 @@ use audio::capture::{finalize_recording, AudioCapture};
 use db::store::{PendingRecording, Store, Transcription};
 use dictation::DictationSession;
 use summarize::{build_prompt, call_claude_cli, is_claude_cli_available};
+use transcribe::job::TranscriptionJob;
 use transcribe::whisper::Transcriber;
 
 /// Wrapper to allow AudioCapture (which contains cpal::Stream, a !Send type)
@@ -29,9 +30,11 @@ unsafe impl Sync for SendableCapture {}
 pub struct AppState {
     capture: Mutex<SendableCapture>,
     dictation: Mutex<Option<DictationSession>>,
-    store: Mutex<Store>,
+    store: std::sync::Arc<Mutex<Store>>,
     transcriber: Mutex<Option<Transcriber>>,
     data_dir: PathBuf,
+    #[allow(dead_code)]
+    current_job: Mutex<Option<TranscriptionJob>>,
 }
 
 #[tauri::command]
@@ -106,11 +109,10 @@ async fn transcribe_recording(
 
     let data_dir = state.data_dir.clone();
     let app = app_handle.clone();
-    let model_path = tauri::async_runtime::spawn_blocking(move || {
-        model::ensure_model(&data_dir, &app)
-    })
-    .await
-    .map_err(|e| format!("Model check failed: {}", e))??;
+    let model_path =
+        tauri::async_runtime::spawn_blocking(move || model::ensure_model(&data_dir, &app))
+            .await
+            .map_err(|e| format!("Model check failed: {}", e))??;
 
     let cached = state.transcriber.lock().map_err(|e| e.to_string())?.take();
     let audio = audio_path.clone();
@@ -224,11 +226,9 @@ async fn start_dictation(
 
     let data_dir = state.data_dir.clone();
     let app = app_handle.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        model::ensure_model(&data_dir, &app)
-    })
-    .await
-    .map_err(|e| format!("Model check failed: {}", e))??;
+    tauri::async_runtime::spawn_blocking(move || model::ensure_model(&data_dir, &app))
+        .await
+        .map_err(|e| format!("Model check failed: {}", e))??;
 
     let mut session = DictationSession::new();
     session.start()?;
@@ -329,11 +329,9 @@ async fn download_whisper_model(
     app_handle: tauri::AppHandle,
 ) -> Result<(), String> {
     let data_dir = state.data_dir.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        model::download_model(&data_dir, &app_handle)
-    })
-    .await
-    .map_err(|e| format!("Download task failed: {}", e))??;
+    tauri::async_runtime::spawn_blocking(move || model::download_model(&data_dir, &app_handle))
+        .await
+        .map_err(|e| format!("Download task failed: {}", e))??;
     Ok(())
 }
 
@@ -362,9 +360,10 @@ pub fn run() {
             app.manage(AppState {
                 capture: Mutex::new(SendableCapture(None)),
                 dictation: Mutex::new(None),
-                store: Mutex::new(store),
+                store: std::sync::Arc::new(Mutex::new(store)),
                 transcriber: Mutex::new(None),
                 data_dir,
+                current_job: Mutex::new(None),
             });
 
             Ok(())
