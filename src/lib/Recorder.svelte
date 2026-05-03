@@ -19,10 +19,12 @@
 
     let liveText = $state("");
     let percent = $state(0);
-    /** "idle" | "finalizing" | "cancelling" */
+    /** @type {"idle" | "finalizing" | "cancelling"} */
     let phase = $state("idle");
     let pendingDurationLabel = $state("");
+    /** @type {number | null} */
     let startedFromPendingId = null;
+    /** @type {Array<() => void>} */
     let unlisteners = [];
 
     function isFinalizing() {

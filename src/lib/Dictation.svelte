@@ -8,15 +8,17 @@
 
     let { onTranscribed } = $props();
 
-    /** "idle" | "recording" | "finalizing" | "cancelling" */
+    /** @type {"idle" | "recording" | "finalizing" | "cancelling"} */
     let phase = $state("idle");
     let error = $state("");
     let liveText = $state("");
     let elapsed = $state(0);
     let percent = $state(0);
     let recordedDurationLabel = $state("");
+    /** @type {ReturnType<typeof setInterval> | null} */
     let timer = null;
 
+    /** @type {Array<() => void>} */
     let unlisteners = [];
 
     function isFinalizing() {
