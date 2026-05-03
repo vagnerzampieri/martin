@@ -58,6 +58,9 @@ impl Store {
         )
         .map_err(|e| format!("Failed to create pending_recordings table: {}", e))?;
 
+        // Migration: add `status` column if missing. Idempotent — older databases
+        // (created before this column existed) gain it on next launch with
+        // existing rows backfilled to 'complete' via the column DEFAULT.
         let migration_result = conn.execute(
             "ALTER TABLE transcriptions ADD COLUMN status TEXT NOT NULL DEFAULT 'complete'",
             [],
@@ -563,11 +566,11 @@ mod tests {
         let rows: Vec<String> = store
             .conn
             .prepare("SELECT status FROM transcriptions ORDER BY id")
-            .unwrap()
+            .expect("prepare")
             .query_map([], |r| r.get::<_, String>(0))
-            .unwrap()
+            .expect("query_map")
             .collect::<Result<Vec<_>, _>>()
-            .unwrap();
+            .expect("collect rows");
         assert_eq!(rows.len(), 2);
         assert!(rows.iter().all(|s| s == "complete"));
     }
