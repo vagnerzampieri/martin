@@ -244,11 +244,9 @@ Following CLAUDE.md (Kent Beck TDD).
 - `TranscriptionJob` state transitions are explicit (Recording → Finalizing → Complete; Finalizing → Cancelling → Idle).
 - `cancel_flag` set + run_finalize → returns `Cancelled` variant without panic. (Use a fake transcriber that polls the abort callback in a tight loop.)
 
-### Frontend tests (Vitest)
+### Frontend tests
 
-- `<FinalizingProgress>` renders the percent, the live text, and the cancel button. Cancel triggers the confirmation modal; only the confirming button calls `onCancel`.
-- `appBusy` store: setting `true` adds `disabled` to all three nav buttons in `+page.svelte`.
-- The dictation/recorder components route between `recording`/`finalizing`/`cancelling` views correctly when receiving the new events.
+The project does not currently have Vitest or any other JS test framework set up — `package.json` has no test runner. Setting one up is real scope creep and would not catch the bug class this work addresses (which lives in the Rust IPC and DB layer). For this feature, frontend correctness is verified through the manual integration plan below. Setting up Vitest is tracked in **Out of scope**.
 
 ### Manual integration plan (documented in PR description)
 
@@ -278,3 +276,4 @@ These are real problems but separate axes; tracking each as a follow-up issue ra
 - **Whisper-rs acceleration features** (`openblas`, `vulkan`, `cuda`). The likely biggest single perf win for Vivi, but orthogonal to UX.
 - **User-selectable model size** (tiny/base/small) in the UI. Lets slow machines opt for `tiny` (~75 MB, much faster, lower accuracy).
 - **Pending recordings folder relocation** outside `app_data_dir`.
+- **Vitest setup for frontend unit tests.** The project has no JS test runner configured. Adding one is a separate piece of plumbing.
