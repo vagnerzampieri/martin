@@ -76,6 +76,7 @@ impl Store {
         Ok(Self { conn })
     }
 
+    #[allow(dead_code)]
     pub fn save(
         &self,
         title: &str,

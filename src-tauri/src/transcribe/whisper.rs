@@ -16,6 +16,7 @@ impl Transcriber {
         Ok(Self { ctx })
     }
 
+    #[allow(dead_code)]
     pub fn transcribe(&self, audio_path: &Path, language: &str) -> Result<String, String> {
         let samples = Self::load_wav_as_mono_f32(audio_path)?;
 

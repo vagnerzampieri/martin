@@ -97,59 +97,132 @@ fn clear_current_job_and_emit_error(app: &tauri::AppHandle, job_id: i64, error: 
 }
 
 #[tauri::command]
-async fn transcribe_recording(
+async fn transcribe_pending_recording(
     state: State<'_, AppState>,
     app_handle: tauri::AppHandle,
     pending_id: i64,
     title: String,
     language: String,
-) -> Result<Transcription, String> {
+) -> Result<i64, String> {
+    use crate::transcribe::job::{
+        finish_job, run_finalize_pending_file, ErrorPayload, JobKind, TranscriptionJob,
+    };
+    use std::panic::AssertUnwindSafe;
+
+    {
+        let job_guard = state.current_job.lock().map_err(|e| e.to_string())?;
+        if job_guard.is_some() {
+            return Err("Another transcription is in progress".to_string());
+        }
+    }
+
     let pending = {
         let store = state.store.lock().map_err(|e| e.to_string())?;
         store.get_pending(pending_id)?
     };
 
-    let audio_path = std::path::PathBuf::from(&pending.file_path);
-    if !audio_path.exists() {
+    let wav_path = std::path::PathBuf::from(&pending.file_path);
+    if !wav_path.exists() {
         let store = state.store.lock().map_err(|e| e.to_string())?;
         let _ = store.delete_pending(pending_id);
         return Err("Recording file not found. It may have been deleted.".to_string());
     }
 
     let data_dir = state.data_dir.clone();
-    let app = app_handle.clone();
-    let model_path =
-        tauri::async_runtime::spawn_blocking(move || model::ensure_model(&data_dir, &app))
-            .await
-            .map_err(|e| format!("Model check failed: {}", e))??;
+    let app_for_model = app_handle.clone();
+    tauri::async_runtime::spawn_blocking(move || model::ensure_model(&data_dir, &app_for_model))
+        .await
+        .map_err(|e| format!("Model check failed: {}", e))??;
 
-    let cached = state.transcriber.lock().map_err(|e| e.to_string())?.take();
-    let audio = audio_path.clone();
-    let lang = language.clone();
-
-    let (text, duration_secs, transcriber) = tauri::async_runtime::spawn_blocking(
-        move || -> Result<(String, f64, Transcriber), String> {
-            let transcriber = get_or_create_transcriber(cached, &model_path)?;
-            let text = transcriber.transcribe(&audio, &lang)?;
-            let duration_secs = transcribe::whisper::wav_duration_secs(&audio)?;
-            Ok((text, duration_secs, transcriber))
-        },
-    )
-    .await
-    .map_err(|e| format!("Transcription task failed: {}", e))??;
-
-    *state.transcriber.lock().map_err(|e| e.to_string())? = Some(transcriber);
-
-    let store = state.store.lock().map_err(|e| e.to_string())?;
-    let id = store.save(&title, &text, &language, duration_secs)?;
-
-    if let Err(e) = std::fs::remove_file(&audio_path) {
-        eprintln!("Warning: failed to delete recording file: {}", e);
+    let mut job_guard = state.current_job.lock().map_err(|e| e.to_string())?;
+    if job_guard.is_some() {
+        return Err("Another transcription is in progress".to_string());
     }
 
-    store.delete_pending(pending_id)?;
+    let id = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        store.insert_partial(&title, &language)?
+    };
 
-    store.get(id)
+    let job = TranscriptionJob::new(
+        id,
+        JobKind::PendingFile {
+            wav_path: wav_path.clone(),
+            pending_id,
+        },
+    );
+
+    *job_guard = Some(job.clone());
+    drop(job_guard);
+
+    let store_for_worker = state.store.clone();
+    let app = app_handle.clone();
+    let transcriber_taken = state.transcriber.lock().map_err(|e| e.to_string())?.take();
+    let model_path = crate::model::model_path(&state.data_dir);
+    let language_owned = language.clone();
+    let job_id = id;
+    let wav_for_worker = wav_path.clone();
+
+    std::thread::spawn(move || {
+        let transcriber = match transcriber_taken {
+            Some(t) => t,
+            None => match Transcriber::new(&model_path) {
+                Ok(t) => t,
+                Err(e) => {
+                    if let Some(s) = app.try_state::<AppState>() {
+                        let _ = s.current_job.lock().map(|mut g| *g = None);
+                    }
+                    let _ = app.emit(
+                        "transcription://error",
+                        ErrorPayload {
+                            id: job_id,
+                            error: e,
+                        },
+                    );
+                    return;
+                }
+            },
+        };
+
+        let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            let outcome = run_finalize_pending_file(
+                &job,
+                &transcriber,
+                &wav_for_worker,
+                language_owned,
+                store_for_worker.clone(),
+                app.clone(),
+            );
+            (job, outcome)
+        }));
+
+        let (job, outcome) = match result {
+            Ok(t) => t,
+            Err(_panic) => {
+                if let Some(s) = app.try_state::<AppState>() {
+                    let _ = s.transcriber.lock().map(|mut g| *g = Some(transcriber));
+                    let _ = s.current_job.lock().map(|mut g| *g = None);
+                }
+                let _ = app.emit(
+                    "transcription://error",
+                    ErrorPayload {
+                        id: job_id,
+                        error: "Transcription worker panicked".to_string(),
+                    },
+                );
+                return;
+            }
+        };
+
+        if let Some(s) = app.try_state::<AppState>() {
+            let _ = s.transcriber.lock().map(|mut g| *g = Some(transcriber));
+            let _ = s.current_job.lock().map(|mut g| *g = None);
+        }
+
+        finish_job(job, outcome, store_for_worker, app);
+    });
+
+    Ok(id)
 }
 
 #[tauri::command]
@@ -446,7 +519,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             start_recording,
             stop_recording,
-            transcribe_recording,
+            transcribe_pending_recording,
             list_transcriptions,
             get_transcription,
             delete_transcription,
