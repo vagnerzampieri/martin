@@ -11,6 +11,7 @@ pub struct Transcription {
     pub duration_secs: f64,
     pub created_at: String,
     pub summary: Option<String>,
+    pub status: String,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -95,7 +96,7 @@ impl Store {
     pub fn list(&self) -> Result<Vec<Transcription>, String> {
         let mut stmt = self
             .conn
-            .prepare("SELECT id, title, text, language, duration_secs, created_at, summary FROM transcriptions ORDER BY created_at DESC")
+            .prepare("SELECT id, title, text, language, duration_secs, created_at, summary, status FROM transcriptions ORDER BY created_at DESC")
             .map_err(|e| format!("Failed to prepare query: {}", e))?;
 
         let rows = stmt
@@ -108,6 +109,7 @@ impl Store {
                     duration_secs: row.get(4)?,
                     created_at: row.get(5)?,
                     summary: row.get(6)?,
+                    status: row.get(7)?,
                 })
             })
             .map_err(|e| format!("Failed to query: {}", e))?;
@@ -119,7 +121,7 @@ impl Store {
     pub fn get(&self, id: i64) -> Result<Transcription, String> {
         self.conn
             .query_row(
-                "SELECT id, title, text, language, duration_secs, created_at, summary FROM transcriptions WHERE id = ?1",
+                "SELECT id, title, text, language, duration_secs, created_at, summary, status FROM transcriptions WHERE id = ?1",
                 params![id],
                 |row| {
                     Ok(Transcription {
@@ -130,6 +132,7 @@ impl Store {
                         duration_secs: row.get(4)?,
                         created_at: row.get(5)?,
                         summary: row.get(6)?,
+                        status: row.get(7)?,
                     })
                 },
             )
@@ -533,6 +536,23 @@ mod tests {
             )
             .expect("query");
         assert_eq!(row, "complete");
+    }
+
+    #[test]
+    fn get_returns_status_field() {
+        let (store, _temp_file) = create_temp_store();
+        let id = store.save("t", "txt", "pt", 1.0).expect("save");
+        let t = store.get(id).expect("get");
+        assert_eq!(t.status, "complete");
+    }
+
+    #[test]
+    fn list_returns_status_field() {
+        let (store, _temp_file) = create_temp_store();
+        store.save("t1", "x", "pt", 1.0).expect("save");
+        let rows = store.list().expect("list");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].status, "complete");
     }
 
     #[test]
