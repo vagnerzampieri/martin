@@ -134,6 +134,20 @@ impl Store {
         Ok(())
     }
 
+    /// Removes partial rows that have no text and no duration — these can only
+    /// come from a force-kill that happened before the first segment callback
+    /// fired. Returns the number of rows deleted.
+    pub fn delete_empty_partials(&self) -> Result<usize, String> {
+        let affected = self
+            .conn
+            .execute(
+                "DELETE FROM transcriptions WHERE status = 'partial' AND text = '' AND duration_secs = 0.0",
+                [],
+            )
+            .map_err(|e| format!("Failed to sweep empty partials: {}", e))?;
+        Ok(affected)
+    }
+
     pub fn list(&self) -> Result<Vec<Transcription>, String> {
         let mut stmt = self
             .conn
@@ -643,6 +657,25 @@ mod tests {
         store.mark_complete(id).expect("mark");
         let row = store.get(id).expect("get");
         assert_eq!(row.status, "complete");
+    }
+
+    #[test]
+    fn delete_empty_partials_removes_only_empty_partials() {
+        let (store, _temp_file) = create_temp_store();
+
+        let kept_complete = store.save("c", "x", "pt", 1.0).expect("save");
+        let kept_partial_with_text = store.insert_partial("p1", "pt").expect("insert");
+        store
+            .update_text(kept_partial_with_text, "some text", 5.0)
+            .expect("update");
+        let removed_id = store.insert_partial("ghost", "pt").expect("insert");
+
+        let removed = store.delete_empty_partials().expect("sweep");
+        assert_eq!(removed, 1, "only the empty partial should be deleted");
+
+        assert!(store.get(kept_complete).is_ok());
+        assert!(store.get(kept_partial_with_text).is_ok());
+        assert!(store.get(removed_id).is_err());
     }
 
     #[test]

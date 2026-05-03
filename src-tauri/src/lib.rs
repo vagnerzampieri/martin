@@ -358,6 +358,13 @@ pub fn run() {
 
             let store = Store::new(&db_path).expect("Failed to initialize database");
 
+            let swept = store
+                .delete_empty_partials()
+                .expect("Failed to sweep empty partials on startup");
+            if swept > 0 {
+                eprintln!("[startup] swept {} empty partial transcription(s)", swept);
+            }
+
             app.manage(AppState {
                 capture: Mutex::new(SendableCapture(None)),
                 dictation: Mutex::new(None),
