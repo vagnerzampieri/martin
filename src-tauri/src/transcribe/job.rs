@@ -116,6 +116,12 @@ pub fn run_finalize_dictation(
     let committed_prefix = job.committed_text.clone();
 
     if samples.len() < MIN_FINALIZE_SAMPLES {
+        eprintln!(
+            "[finalize id={}] samples below threshold ({} < {}); using prefix-only path",
+            id,
+            samples.len(),
+            MIN_FINALIZE_SAMPLES
+        );
         return if committed_prefix.trim().is_empty() {
             FinalizeOutcome::Cancelled
         } else {
@@ -125,6 +131,14 @@ pub fn run_finalize_dictation(
             }
         };
     }
+
+    eprintln!(
+        "[finalize id={}] starting whisper on {} samples (~{:.1}s) prefix_chars={}",
+        id,
+        samples.len(),
+        samples.len() as f64 / 16000.0,
+        committed_prefix.len()
+    );
 
     let accumulated = Arc::new(Mutex::new(committed_prefix.clone()));
     let acc_for_callback = accumulated.clone();
@@ -211,15 +225,24 @@ pub fn run_finalize_dictation(
                 .lock()
                 .map(|a| a.clone())
                 .unwrap_or(committed_prefix);
+            eprintln!(
+                "[finalize id={}] complete: {} chars",
+                id,
+                final_text.len()
+            );
             FinalizeOutcome::Complete {
                 final_text,
                 duration_secs,
             }
         }
         Err(_) if cancel_flag.load(std::sync::atomic::Ordering::Acquire) => {
+            eprintln!("[finalize id={}] cancelled", id);
             FinalizeOutcome::Cancelled
         }
-        Err(e) => FinalizeOutcome::Error(e),
+        Err(e) => {
+            eprintln!("[finalize id={}] error: {}", id, e);
+            FinalizeOutcome::Error(e)
+        }
     }
 }
 

@@ -128,6 +128,11 @@ async fn transcribe_pending_recording(
         return Err("Recording file not found. It may have been deleted.".to_string());
     }
 
+    eprintln!(
+        "[martin] transcribe_pending_recording pending_id={} duration={:.1}s",
+        pending_id, pending.duration_secs
+    );
+
     let data_dir = state.data_dir.clone();
     let app_for_model = app_handle.clone();
     tauri::async_runtime::spawn_blocking(move || model::ensure_model(&data_dir, &app_for_model))
@@ -321,6 +326,11 @@ async fn start_dictation(
     let channels = session.channels();
     let committed_out = session.committed();
     let last_full_text_out = session.last_full_text();
+
+    eprintln!(
+        "[martin] start_dictation source_rate={}Hz channels={} language={}",
+        source_rate, channels, language
+    );
     let final_audio_out = session.final_audio();
 
     let model_path = model::model_path(&state.data_dir);
@@ -389,6 +399,12 @@ async fn stop_dictation(
     // samples as 16kHz mono and hallucinates garbage.
     let raw_samples = session.take_final_audio();
     let samples = dictation::convert_to_mono_16k(&raw_samples, channels, source_rate);
+    eprintln!(
+        "[martin] stop_dictation raw={} samples mono16k={} samples (~{:.1}s)",
+        raw_samples.len(),
+        samples.len(),
+        samples.len() as f64 / 16000.0
+    );
 
     // last_full_text: best-effort transcription up to the last live poll
     // (covers all audio so far, including post-rollover). Used as the
