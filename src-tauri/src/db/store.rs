@@ -11,6 +11,7 @@ pub struct Transcription {
     pub duration_secs: f64,
     pub created_at: String,
     pub summary: Option<String>,
+    pub status: String,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -29,6 +30,11 @@ impl Store {
     pub fn new(db_path: &Path) -> Result<Self, String> {
         let conn =
             Connection::open(db_path).map_err(|e| format!("Failed to open database: {}", e))?;
+
+        conn.pragma_update(None, "journal_mode", "WAL")
+            .map_err(|e| format!("Failed to set WAL mode: {}", e))?;
+        conn.pragma_update(None, "synchronous", "NORMAL")
+            .map_err(|e| format!("Failed to set synchronous mode: {}", e))?;
 
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS transcriptions (
@@ -53,9 +59,24 @@ impl Store {
         )
         .map_err(|e| format!("Failed to create pending_recordings table: {}", e))?;
 
+        // Migration: add `status` column if missing. Idempotent — older databases
+        // (created before this column existed) gain it on next launch with
+        // existing rows backfilled to 'complete' via the column DEFAULT.
+        let migration_result = conn.execute(
+            "ALTER TABLE transcriptions ADD COLUMN status TEXT NOT NULL DEFAULT 'complete'",
+            [],
+        );
+        match migration_result {
+            Ok(_) => {}
+            Err(rusqlite::Error::SqliteFailure(_, Some(msg)))
+                if msg.contains("duplicate column name") => {}
+            Err(e) => return Err(format!("Failed to add status column: {}", e)),
+        }
+
         Ok(Self { conn })
     }
 
+    #[allow(dead_code)]
     pub fn save(
         &self,
         title: &str,
@@ -73,10 +94,63 @@ impl Store {
         Ok(self.conn.last_insert_rowid())
     }
 
+    pub fn insert_partial(&self, title: &str, language: &str) -> Result<i64, String> {
+        self.conn
+            .execute(
+                "INSERT INTO transcriptions (title, text, language, duration_secs, status) VALUES (?1, '', ?2, 0.0, 'partial')",
+                params![title, language],
+            )
+            .map_err(|e| format!("Failed to insert partial transcription: {}", e))?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn update_text(&self, id: i64, text: &str, duration_secs: f64) -> Result<(), String> {
+        let affected = self
+            .conn
+            .execute(
+                "UPDATE transcriptions SET text = ?1, duration_secs = ?2 WHERE id = ?3",
+                params![text, duration_secs, id],
+            )
+            .map_err(|e| format!("Failed to update text: {}", e))?;
+        if affected == 0 {
+            return Err(format!("Transcription with id {} not found", id));
+        }
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    pub fn mark_complete(&self, id: i64) -> Result<(), String> {
+        let affected = self
+            .conn
+            .execute(
+                "UPDATE transcriptions SET status = 'complete' WHERE id = ?1",
+                params![id],
+            )
+            .map_err(|e| format!("Failed to mark complete: {}", e))?;
+        if affected == 0 {
+            return Err(format!("Transcription with id {} not found", id));
+        }
+        Ok(())
+    }
+
+    /// Removes partial rows that have no text and no duration — these can only
+    /// come from a force-kill that happened before the first segment callback
+    /// fired. Returns the number of rows deleted.
+    pub fn delete_empty_partials(&self) -> Result<usize, String> {
+        let affected = self
+            .conn
+            .execute(
+                "DELETE FROM transcriptions WHERE status = 'partial' AND text = '' AND duration_secs = 0.0",
+                [],
+            )
+            .map_err(|e| format!("Failed to sweep empty partials: {}", e))?;
+        Ok(affected)
+    }
+
     pub fn list(&self) -> Result<Vec<Transcription>, String> {
         let mut stmt = self
             .conn
-            .prepare("SELECT id, title, text, language, duration_secs, created_at, summary FROM transcriptions ORDER BY created_at DESC")
+            .prepare("SELECT id, title, text, language, duration_secs, created_at, summary, status FROM transcriptions ORDER BY created_at DESC")
             .map_err(|e| format!("Failed to prepare query: {}", e))?;
 
         let rows = stmt
@@ -89,6 +163,7 @@ impl Store {
                     duration_secs: row.get(4)?,
                     created_at: row.get(5)?,
                     summary: row.get(6)?,
+                    status: row.get(7)?,
                 })
             })
             .map_err(|e| format!("Failed to query: {}", e))?;
@@ -100,7 +175,7 @@ impl Store {
     pub fn get(&self, id: i64) -> Result<Transcription, String> {
         self.conn
             .query_row(
-                "SELECT id, title, text, language, duration_secs, created_at, summary FROM transcriptions WHERE id = ?1",
+                "SELECT id, title, text, language, duration_secs, created_at, summary, status FROM transcriptions WHERE id = ?1",
                 params![id],
                 |row| {
                     Ok(Transcription {
@@ -111,6 +186,7 @@ impl Store {
                         duration_secs: row.get(4)?,
                         created_at: row.get(5)?,
                         summary: row.get(6)?,
+                        status: row.get(7)?,
                     })
                 },
             )
@@ -493,5 +569,151 @@ mod tests {
 
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("not found"));
+    }
+
+    #[test]
+    fn new_runs_migration_idempotently() {
+        let temp_file = NamedTempFile::new().expect("temp file");
+        let path = temp_file.path().to_path_buf();
+
+        let _ = Store::new(&path).expect("first open");
+
+        let store = Store::new(&path).expect("second open");
+
+        let id = store.save("t", "x", "pt", 1.0).expect("save");
+        let row: String = store
+            .conn
+            .query_row(
+                "SELECT status FROM transcriptions WHERE id = ?1",
+                rusqlite::params![id],
+                |r| r.get(0),
+            )
+            .expect("query");
+        assert_eq!(row, "complete");
+    }
+
+    #[test]
+    fn get_returns_status_field() {
+        let (store, _temp_file) = create_temp_store();
+        let id = store.save("t", "txt", "pt", 1.0).expect("save");
+        let t = store.get(id).expect("get");
+        assert_eq!(t.status, "complete");
+    }
+
+    #[test]
+    fn list_returns_status_field() {
+        let (store, _temp_file) = create_temp_store();
+        store.save("t1", "x", "pt", 1.0).expect("save");
+        let rows = store.list().expect("list");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].status, "complete");
+    }
+
+    #[test]
+    fn insert_partial_creates_row_with_status_partial() {
+        let (store, _temp_file) = create_temp_store();
+        let id = store
+            .insert_partial("Dictation", "pt")
+            .expect("insert_partial");
+        let t = store.get(id).expect("get");
+        assert_eq!(t.title, "Dictation");
+        assert_eq!(t.text, "");
+        assert_eq!(t.language, "pt");
+        assert_eq!(t.duration_secs, 0.0);
+        assert_eq!(t.status, "partial");
+    }
+
+    #[test]
+    fn update_text_overwrites_text_and_duration() {
+        let (store, _temp_file) = create_temp_store();
+        let id = store.insert_partial("t", "pt").expect("insert");
+
+        store.update_text(id, "first chunk", 5.0).expect("update");
+        let row = store.get(id).expect("get");
+        assert_eq!(row.text, "first chunk");
+        assert_eq!(row.duration_secs, 5.0);
+        assert_eq!(row.status, "partial");
+
+        store
+            .update_text(id, "first chunk and more", 12.0)
+            .expect("update");
+        let row = store.get(id).expect("get");
+        assert_eq!(row.text, "first chunk and more");
+        assert_eq!(row.duration_secs, 12.0);
+    }
+
+    #[test]
+    fn update_text_returns_err_for_missing_id() {
+        let (store, _temp_file) = create_temp_store();
+        let err = store.update_text(999, "x", 1.0).unwrap_err();
+        assert!(err.contains("not found"));
+    }
+
+    #[test]
+    fn mark_complete_flips_status() {
+        let (store, _temp_file) = create_temp_store();
+        let id = store.insert_partial("t", "pt").expect("insert");
+        store.mark_complete(id).expect("mark");
+        let row = store.get(id).expect("get");
+        assert_eq!(row.status, "complete");
+    }
+
+    #[test]
+    fn delete_empty_partials_removes_only_empty_partials() {
+        let (store, _temp_file) = create_temp_store();
+
+        let kept_complete = store.save("c", "x", "pt", 1.0).expect("save");
+        let kept_partial_with_text = store.insert_partial("p1", "pt").expect("insert");
+        store
+            .update_text(kept_partial_with_text, "some text", 5.0)
+            .expect("update");
+        let removed_id = store.insert_partial("ghost", "pt").expect("insert");
+
+        let removed = store.delete_empty_partials().expect("sweep");
+        assert_eq!(removed, 1, "only the empty partial should be deleted");
+
+        assert!(store.get(kept_complete).is_ok());
+        assert!(store.get(kept_partial_with_text).is_ok());
+        assert!(store.get(removed_id).is_err());
+    }
+
+    #[test]
+    fn migration_backfills_existing_rows_with_complete_status() {
+        let temp_file = NamedTempFile::new().expect("temp file");
+        let path = temp_file.path().to_path_buf();
+
+        {
+            let conn = rusqlite::Connection::open(&path).expect("open raw");
+            conn.execute(
+                "CREATE TABLE transcriptions (
+                    id INTEGER PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    text TEXT NOT NULL,
+                    language TEXT NOT NULL,
+                    duration_secs REAL NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    summary TEXT
+                )",
+                [],
+            )
+            .expect("create v0.1.0 schema");
+            conn.execute(
+                "INSERT INTO transcriptions (title, text, language, duration_secs) VALUES ('old1', 'a', 'pt', 1.0), ('old2', 'b', 'en', 2.0)",
+                [],
+            )
+            .expect("seed");
+        }
+
+        let store = Store::new(&path).expect("upgrade open");
+        let rows: Vec<String> = store
+            .conn
+            .prepare("SELECT status FROM transcriptions ORDER BY id")
+            .expect("prepare")
+            .query_map([], |r| r.get::<_, String>(0))
+            .expect("query_map")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect rows");
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|s| s == "complete"));
     }
 }

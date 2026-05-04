@@ -8,6 +8,7 @@
     import { invoke } from "@tauri-apps/api/core";
     import { onMount } from "svelte";
     import ModelDownload from "../lib/ModelDownload.svelte";
+    import { appBusy } from "../lib/appBusy.js";
 
     let currentView = $state("recorder");
     let selectedTranscription = $state(null);
@@ -61,13 +62,17 @@
         <nav>
             <button
                 class:active={currentView === "recorder"}
-                onclick={showRecorder}
+                onclick={() => ($appBusy ? null : showRecorder())}
+                aria-disabled={$appBusy}
+                title={$appBusy ? t("navLockedTooltip") : ""}
             >
                 {t("record")}
             </button>
             <button
                 class:active={currentView === "dictation"}
-                onclick={showDictation}
+                onclick={() => ($appBusy ? null : showDictation())}
+                aria-disabled={$appBusy}
+                title={$appBusy ? t("navLockedTooltip") : ""}
             >
                 {t("dictation")}
             </button>
@@ -128,5 +133,10 @@
         background: var(--primary);
         color: var(--text);
         border-color: var(--primary);
+    }
+
+    nav button[aria-disabled="true"] {
+        opacity: 0.4;
+        cursor: not-allowed;
     }
 </style>

@@ -4,8 +4,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use tauri::Emitter;
 
-const MODEL_URL: &str =
-    "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin";
+const MODEL_URL: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin";
 const MODEL_FILENAME: &str = "ggml-small.bin";
 
 pub fn model_path(data_dir: &Path) -> PathBuf {
@@ -37,8 +36,8 @@ pub fn download_model(data_dir: &Path, app_handle: &tauri::AppHandle) -> Result<
     let total = response.content_length().unwrap_or(0);
     let total_mb = total as f64 / 1_048_576.0;
 
-    let mut file = std::fs::File::create(&part)
-        .map_err(|e| format!("Failed to create temp file: {}", e))?;
+    let mut file =
+        std::fs::File::create(&part).map_err(|e| format!("Failed to create temp file: {}", e))?;
 
     let mut downloaded: u64 = 0;
     let mut last_percent: u8 = 255;
@@ -74,8 +73,7 @@ pub fn download_model(data_dir: &Path, app_handle: &tauri::AppHandle) -> Result<
         }
     }
 
-    std::fs::rename(&part, &dest)
-        .map_err(|e| format!("Failed to finalize download: {}", e))?;
+    std::fs::rename(&part, &dest).map_err(|e| format!("Failed to finalize download: {}", e))?;
 
     let _ = app_handle.emit("model://download-complete", ());
 
@@ -112,8 +110,7 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let models_dir = dir.path().join("models");
         std::fs::create_dir_all(&models_dir).expect("create models dir");
-        std::fs::write(models_dir.join("ggml-small.bin"), b"fake model")
-            .expect("write fake model");
+        std::fs::write(models_dir.join("ggml-small.bin"), b"fake model").expect("write fake model");
         assert!(model_exists(dir.path()));
     }
 }

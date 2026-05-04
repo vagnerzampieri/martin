@@ -3,33 +3,91 @@
     import { listen } from "@tauri-apps/api/event";
     import { onMount, onDestroy } from "svelte";
     import { t, locale } from "./i18n.js";
+    import { appBusy } from "./appBusy.js";
+    import FinalizingProgress from "./FinalizingProgress.svelte";
 
     let { onTranscribed } = $props();
 
-    let dictating = $state(false);
+    /** @type {"idle" | "recording" | "finalizing" | "cancelling"} */
+    let phase = $state("idle");
     let error = $state("");
-    let fullText = $state("");
+    let liveText = $state("");
     let elapsed = $state(0);
+    let percent = $state(0);
+    let recordedDurationLabel = $state("");
+    /** @type {ReturnType<typeof setInterval> | null} */
     let timer = null;
-    let unlisten = null;
+
+    /** @type {Array<() => void>} */
+    let unlisteners = [];
+
+    function isFinalizing() {
+        return phase === "finalizing" || phase === "cancelling";
+    }
 
     onMount(async () => {
-        unlisten = await listen("dictation://segment", (event) => {
-            fullText = event.payload.fullText;
-        });
+        unlisteners.push(
+            await listen("dictation://segment", (event) => {
+                if (phase !== "recording") return;
+                liveText = event.payload.fullText;
+            }),
+            await listen("transcription://text", (event) => {
+                if (!isFinalizing()) return;
+                // Only overwrite if the worker's accumulated text has
+                // surpassed the live-loop text we already have. Otherwise
+                // we'd flash a regressing liveText (worker starts empty
+                // and grows back, which felt like the text disappeared).
+                const incoming = event.payload.text ?? "";
+                if (incoming.length > liveText.length) {
+                    liveText = incoming;
+                }
+            }),
+            await listen("transcription://progress", (event) => {
+                if (!isFinalizing()) return;
+                percent = event.payload.percent;
+            }),
+            await listen("transcription://complete", (event) => {
+                if (!isFinalizing()) return;
+                percent = 100;
+                setTimeout(() => {
+                    phase = "idle";
+                    appBusy.set(false);
+                    liveText = "";
+                    percent = 0;
+                    recordedDurationLabel = "";
+                }, 250);
+                onTranscribed?.(event.payload.transcription);
+            }),
+            await listen("transcription://cancelled", (_event) => {
+                if (!isFinalizing()) return;
+                phase = "idle";
+                appBusy.set(false);
+                liveText = "";
+                percent = 0;
+                recordedDurationLabel = "";
+            }),
+            await listen("transcription://error", (event) => {
+                if (!isFinalizing()) return;
+                error = event.payload.error;
+                phase = "idle";
+                appBusy.set(false);
+                recordedDurationLabel = "";
+            }),
+        );
     });
 
     onDestroy(() => {
         if (timer) clearInterval(timer);
-        if (unlisten) unlisten();
+        for (const u of unlisteners) u();
     });
 
     async function startDictation() {
         try {
             error = "";
-            fullText = "";
+            liveText = "";
+            percent = 0;
             await invoke("start_dictation", { language: locale });
-            dictating = true;
+            phase = "recording";
             elapsed = 0;
             timer = setInterval(() => { elapsed += 1; }, 1000);
         } catch (e) {
@@ -41,15 +99,29 @@
         try {
             clearInterval(timer);
             timer = null;
-            dictating = false;
-            const now = new Date().toLocaleString("pt-BR");
-            const result = await invoke("stop_dictation", {
+            const now = new Date().toLocaleString(
+                locale === "pt" ? "pt-BR" : "en-US",
+            );
+            recordedDurationLabel = `${t("recordedDuration")} ${formatTime(elapsed)}`;
+            phase = "finalizing";
+            appBusy.set(true);
+            await invoke("stop_dictation", {
                 title: `${t("dictation")} ${now}`,
-                fullText: fullText,
                 language: locale,
                 durationSecs: elapsed,
             });
-            onTranscribed?.(result);
+        } catch (e) {
+            error = e;
+            phase = "idle";
+            appBusy.set(false);
+            recordedDurationLabel = "";
+        }
+    }
+
+    async function requestCancel() {
+        try {
+            phase = "cancelling";
+            await invoke("cancel_job");
         } catch (e) {
             error = e;
         }
@@ -63,7 +135,7 @@
 </script>
 
 <div class="dictation">
-    {#if dictating}
+    {#if phase === "recording"}
         <div class="status dictating">
             <span class="dot"></span>
             {t("dictating")} {formatTime(elapsed)}
@@ -71,6 +143,17 @@
         <button class="btn-stop" onclick={stopDictation}>
             {t("stopDictation")}
         </button>
+        {#if liveText}
+            <div class="live-text"><pre>{liveText}</pre></div>
+        {/if}
+    {:else if phase === "finalizing" || phase === "cancelling"}
+        <FinalizingProgress
+            {percent}
+            {liveText}
+            cancelling={phase === "cancelling"}
+            jobLabel={recordedDurationLabel}
+            onCancel={requestCancel}
+        />
     {:else}
         <button class="btn-start" onclick={startDictation}>
             {t("startDictation")}
@@ -79,12 +162,6 @@
 
     {#if error}
         <div class="error">{error}</div>
-    {/if}
-
-    {#if fullText}
-        <div class="live-text">
-            <pre>{fullText}</pre>
-        </div>
     {/if}
 </div>
 
