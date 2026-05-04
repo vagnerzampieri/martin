@@ -58,6 +58,10 @@ impl Transcriber {
         params.set_print_realtime(false);
         params.set_print_timestamps(false);
         params.set_no_context(true);
+        // Suppress whisper's non-speech tokens (`[música]`, `[risos]`,
+        // `[Som de futebol]`, etc.) so dictation-style audio with
+        // bursts of silence does not surface them in the transcript.
+        params.set_suppress_nst(true);
 
         let mut state = self
             .ctx
@@ -109,6 +113,8 @@ impl Transcriber {
         params.set_print_realtime(false);
         params.set_print_timestamps(false);
         params.set_no_context(true);
+        // Suppress non-speech tokens — see transcribe_samples for rationale.
+        params.set_suppress_nst(true);
 
         params.set_progress_callback_safe(on_progress);
         params.set_segment_callback_safe_lossy(move |data: whisper_rs::SegmentCallbackData| {
