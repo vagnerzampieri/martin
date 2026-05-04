@@ -321,6 +321,7 @@ async fn start_dictation(
     let channels = session.channels();
     let committed_out = session.committed();
     let last_full_text_out = session.last_full_text();
+    let final_audio_out = session.final_audio();
 
     let model_path = model::model_path(&state.data_dir);
     let cached = state.transcriber.lock().map_err(|e| e.to_string())?.take();
@@ -335,6 +336,7 @@ async fn start_dictation(
             running,
             committed_out,
             last_full_text_out,
+            final_audio_out,
             &transcriber,
             &language_owned,
             source_rate,
@@ -375,36 +377,48 @@ async fn stop_dictation(
 
     session.stop_and_join();
 
-    let samples = session.drain_buffer();
+    // After join: audio is in final_audio (handed off by the live loop).
+    let samples = session.take_final_audio();
+
+    // last_full_text: best-effort transcription up to the last live poll
+    // (covers all audio so far, including post-rollover). Used as the
+    // text shown in the partial row for crash recovery.
     let last_full = session
         .last_full_text()
         .lock()
         .map(|s| s.clone())
         .unwrap_or_default();
-    let committed_prefix = if !last_full.trim().is_empty() {
-        last_full.trim().to_string()
-    } else {
-        session
-            .committed()
-            .lock()
-            .map(|c| c.join(" ").trim().to_string())
-            .unwrap_or_default()
-    };
+
+    // Worker seed: ONLY committed (rolled-over) segments. The audio
+    // handed off in `samples` is post-rollover, so the finalize whisper
+    // pass will produce text for that. Seeding `acc` with `last_full`
+    // would double-count the post-rollover portion.
+    let worker_seed = session
+        .committed()
+        .lock()
+        .map(|c| c.join(" ").trim().to_string())
+        .unwrap_or_default();
 
     *dictation_guard = None;
     drop(dictation_guard);
 
+    let partial_text = if !last_full.trim().is_empty() {
+        last_full.trim().to_string()
+    } else {
+        worker_seed.clone()
+    };
+
     let id = {
         let store = state.store.lock().map_err(|e| e.to_string())?;
         let new_id = store.insert_partial(&title, &language)?;
-        if !committed_prefix.is_empty() {
-            store.update_text(new_id, &committed_prefix, duration_secs)?;
+        if !partial_text.is_empty() {
+            store.update_text(new_id, &partial_text, duration_secs)?;
         }
         new_id
     };
 
     let mut job = TranscriptionJob::new(id, JobKind::Dictation);
-    job.committed_text = committed_prefix;
+    job.committed_text = worker_seed;
     let job_id = job.id;
 
     *job_guard = Some(job.clone());
@@ -494,6 +508,13 @@ async fn download_whisper_model(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Capture whisper.cpp / ggml stderr noise. With no `log_backend` /
+    // `tracing_backend` feature enabled on whisper-rs, this effectively
+    // silences whisper's per-token decode prints — the model load lines
+    // and the long `whisper_full_with_state: id = N, decoder = 0...`
+    // streams that flooded the dev console.
+    whisper_rs::install_logging_hooks();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {

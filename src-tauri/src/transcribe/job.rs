@@ -106,10 +106,25 @@ pub fn run_finalize_dictation(
     app_handle: AppHandle,
 ) -> FinalizeOutcome {
     const PERSIST_DEBOUNCE_MS: u64 = 1000;
+    // Whisper trips on very short clips (<~1s of mono 16kHz audio is
+    // 16000 samples). Below this we skip the inference pass entirely
+    // and use the live-loop's prefix as the final text.
+    const MIN_FINALIZE_SAMPLES: usize = 16_000;
 
     let id = job.id;
     let cancel_flag = job.cancel_flag.clone();
     let committed_prefix = job.committed_text.clone();
+
+    if samples.len() < MIN_FINALIZE_SAMPLES {
+        return if committed_prefix.trim().is_empty() {
+            FinalizeOutcome::Cancelled
+        } else {
+            FinalizeOutcome::Complete {
+                final_text: committed_prefix,
+                duration_secs,
+            }
+        };
+    }
 
     let accumulated = Arc::new(Mutex::new(committed_prefix.clone()));
     let acc_for_callback = accumulated.clone();
