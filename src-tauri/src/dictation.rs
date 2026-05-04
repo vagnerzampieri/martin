@@ -165,7 +165,7 @@ impl DictationSession {
     }
 }
 
-fn convert_to_mono_16k(samples: &[f32], channels: u16, source_rate: u32) -> Vec<f32> {
+pub fn convert_to_mono_16k(samples: &[f32], channels: u16, source_rate: u32) -> Vec<f32> {
     let mono: Vec<f32> = if channels >= 2 {
         samples
             .chunks(channels as usize)

@@ -375,10 +375,20 @@ async fn stop_dictation(
         return Err("Another transcription is in progress".to_string());
     }
 
+    // Capture device rate + channels BEFORE join+drop so we can
+    // convert the raw audio to mono 16kHz (whisper's required format)
+    // after the session is taken.
+    let source_rate = session.source_rate();
+    let channels = session.channels();
+
     session.stop_and_join();
 
-    // After join: audio is in final_audio (handed off by the live loop).
-    let samples = session.take_final_audio();
+    // After join: raw audio (device rate, multi-channel) is in
+    // final_audio; convert to mono 16k before handing it to whisper.
+    // Without the conversion, whisper interprets device-rate stereo
+    // samples as 16kHz mono and hallucinates garbage.
+    let raw_samples = session.take_final_audio();
+    let samples = dictation::convert_to_mono_16k(&raw_samples, channels, source_rate);
 
     // last_full_text: best-effort transcription up to the last live poll
     // (covers all audio so far, including post-rollover). Used as the
