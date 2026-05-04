@@ -10,8 +10,8 @@
         onCancel,
     } = $props();
     let confirming = $state(false);
-    let liveTextEl;
-    let dialogEl;
+    let liveTextEl = $state();
+    let dialogEl = $state();
     let lastFocused = null;
 
     const SIZE = 96;

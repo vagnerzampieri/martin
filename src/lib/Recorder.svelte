@@ -37,7 +37,10 @@
         unlisteners.push(
             await listen("transcription://text", (event) => {
                 if (!isFinalizing()) return;
-                liveText = event.payload.text;
+                const incoming = event.payload.text ?? "";
+                if (incoming.length > liveText.length) {
+                    liveText = incoming;
+                }
             }),
             await listen("transcription://progress", (event) => {
                 if (!isFinalizing()) return;

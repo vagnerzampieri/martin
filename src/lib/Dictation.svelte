@@ -33,7 +33,14 @@
             }),
             await listen("transcription://text", (event) => {
                 if (!isFinalizing()) return;
-                liveText = event.payload.text;
+                // Only overwrite if the worker's accumulated text has
+                // surpassed the live-loop text we already have. Otherwise
+                // we'd flash a regressing liveText (worker starts empty
+                // and grows back, which felt like the text disappeared).
+                const incoming = event.payload.text ?? "";
+                if (incoming.length > liveText.length) {
+                    liveText = incoming;
+                }
             }),
             await listen("transcription://progress", (event) => {
                 if (!isFinalizing()) return;
