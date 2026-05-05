@@ -443,6 +443,41 @@ async fn stop_dictation(
         new_id
     };
 
+    // Fast path: if the live transcription loop already produced text
+    // for this audio, skip the finalize whisper pass entirely. The live
+    // loop and finalize use identical params on identical audio — running
+    // whisper a second time is duplicated work that turns into minutes
+    // of wait on slow machines and risks OOM (whisper error -6 is
+    // typically encode failure under memory pressure).
+    if !last_full.trim().is_empty() {
+        eprintln!(
+            "[martin] stop_dictation fast path: live text complete ({} chars), skipping finalize pass",
+            last_full.trim().len()
+        );
+        let final_text = last_full.trim().to_string();
+        let transcription = {
+            let store = state.store.lock().map_err(|e| e.to_string())?;
+            store.update_text(id, &final_text, duration_secs)?;
+            store.mark_complete(id)?;
+            store.get(id)?
+        };
+
+        // current_job was never set on the fast path — drop the guard
+        // so it is released cleanly.
+        drop(job_guard);
+
+        #[derive(Clone, serde::Serialize)]
+        struct CompletePayload {
+            id: i64,
+            transcription: db::store::Transcription,
+        }
+        let _ = app_handle.emit(
+            "transcription://complete",
+            CompletePayload { id, transcription },
+        );
+        return Ok(id);
+    }
+
     let mut job = TranscriptionJob::new(id, JobKind::Dictation);
     job.committed_text = worker_seed;
     let job_id = job.id;

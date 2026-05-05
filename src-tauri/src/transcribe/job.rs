@@ -225,11 +225,7 @@ pub fn run_finalize_dictation(
                 .lock()
                 .map(|a| a.clone())
                 .unwrap_or(committed_prefix);
-            eprintln!(
-                "[finalize id={}] complete: {} chars",
-                id,
-                final_text.len()
-            );
+            eprintln!("[finalize id={}] complete: {} chars", id, final_text.len());
             FinalizeOutcome::Complete {
                 final_text,
                 duration_secs,
