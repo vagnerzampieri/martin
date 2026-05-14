@@ -221,10 +221,11 @@ pub fn run_finalize_dictation(
     // (deleting work the user actually got back).
     match result {
         Ok(_) => {
-            let final_text = accumulated
+            let raw_final = accumulated
                 .lock()
                 .map(|a| a.clone())
                 .unwrap_or(committed_prefix);
+            let final_text = crate::postprocess::normalize(&raw_final);
             eprintln!("[finalize id={}] complete: {} chars", id, final_text.len());
             FinalizeOutcome::Complete {
                 final_text,

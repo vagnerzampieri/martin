@@ -353,16 +353,21 @@ pub fn run_transcription_loop(
         );
 
         if !pass_text.is_empty() {
-            let full_text = if committed_segments.is_empty() {
+            let stable_text = committed_segments.join(" ");
+            let raw_full = if stable_text.is_empty() {
                 pass_text.clone()
             } else {
-                format!("{} {}", committed_segments.join(" "), pass_text)
+                format!("{} {}", stable_text, pass_text)
             };
+            let full_text = crate::postprocess::normalize(&raw_full);
+            let stable_normalized = crate::postprocess::normalize(&stable_text);
+            let provisional_normalized = crate::postprocess::normalize(&pass_text);
+
             let _ = app_handle.emit(
                 "dictation://segment",
                 serde_json::json!({
-                    "stableText": committed_segments.join(" "),
-                    "provisionalText": pass_text,
+                    "stableText": stable_normalized,
+                    "provisionalText": provisional_normalized,
                     "fullText": full_text,
                 }),
             );

@@ -467,7 +467,7 @@ async fn stop_dictation(
             "[martin] stop_dictation fast path: live text complete ({} chars), skipping finalize pass",
             last_full.trim().len()
         );
-        let final_text = last_full.trim().to_string();
+        let final_text = crate::postprocess::normalize(last_full.trim());
         let transcription = {
             let store = state.store.lock().map_err(|e| e.to_string())?;
             store.update_text(id, &final_text, duration_secs)?;
