@@ -2,8 +2,10 @@ mod audio;
 mod db;
 mod dictation;
 mod model;
+mod postprocess;
 mod summarize;
 mod transcribe;
+mod vad;
 
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -303,7 +305,7 @@ async fn start_dictation(
     state: State<'_, AppState>,
     app_handle: tauri::AppHandle,
     language: String,
-) -> Result<(), String> {
+) -> Result<i64, String> {
     {
         let guard = state.dictation.lock().map_err(|e| e.to_string())?;
         if guard.as_ref().is_some_and(|d| d.is_running()) {
@@ -318,7 +320,12 @@ async fn start_dictation(
         .map_err(|e| format!("Model check failed: {}", e))??;
 
     let mut session = DictationSession::new();
-    session.start()?;
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| format!("System clock error: {}", e))?
+        .as_millis();
+    let audio_path = state.data_dir.join(format!("dictation_{}.wav", timestamp));
+    session.start(audio_path)?;
 
     let buffer = session.buffer();
     let running = session.running_flag();
@@ -338,6 +345,23 @@ async fn start_dictation(
 
     let transcriber = get_or_create_transcriber(cached, &model_path)?;
 
+    let state_for_loop = session.state();
+    let last_transcribed_atom_for_loop = session.last_transcribed_raw_len();
+    let pending_paragraph_atom_for_loop = session.pending_paragraph_break_flag();
+    let store_for_loop = state.store.clone();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| format!("System clock error: {}", e))?
+        .as_secs();
+    let title = format!("Dictation {}", now);
+    let partial_id = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        let id = store.insert_partial(&title, &language)?;
+        if let Some(path) = session.audio_path() {
+            let _ = store.set_audio_path(id, &path.to_string_lossy());
+        }
+        id
+    };
     let app_for_loop = app_handle.clone();
     let language_owned = language.clone();
     let worker = std::thread::spawn(move || {
@@ -347,10 +371,15 @@ async fn start_dictation(
             committed_out,
             last_full_text_out,
             final_audio_out,
+            state_for_loop,
+            last_transcribed_atom_for_loop,
+            pending_paragraph_atom_for_loop,
             &transcriber,
             &language_owned,
             source_rate,
             channels,
+            partial_id,
+            store_for_loop,
             app_for_loop.clone(),
         );
 
@@ -359,17 +388,27 @@ async fn start_dictation(
         }
     });
 
+    let level_running = session.running_flag();
+    let level_peak = session.last_peak_bits();
+    let level_state = session.state();
+    let level_app = app_handle.clone();
+    let level_worker = std::thread::spawn(move || {
+        dictation::run_level_emitter(level_running, level_peak, level_state, level_app);
+    });
+
     session.set_worker(worker);
+    session.set_level_worker(level_worker);
 
     *state.dictation.lock().map_err(|e| e.to_string())? = Some(session);
 
-    Ok(())
+    Ok(partial_id)
 }
 
 #[tauri::command]
 async fn stop_dictation(
     state: State<'_, AppState>,
     app_handle: tauri::AppHandle,
+    partial_id: i64,
     title: String,
     language: String,
     duration_secs: f64,
@@ -391,70 +430,71 @@ async fn stop_dictation(
     let source_rate = session.source_rate();
     let channels = session.channels();
 
+    // Snapshot atomics before the session is joined+taken.
+    let last_transcribed_raw_len = session
+        .last_transcribed_raw_len()
+        .load(std::sync::atomic::Ordering::Acquire);
+    let pending_paragraph_break = session
+        .pending_paragraph_break_flag()
+        .load(std::sync::atomic::Ordering::Acquire);
+
     session.stop_and_join();
 
-    // After join: raw audio (device rate, multi-channel) is in
-    // final_audio; convert to mono 16k before handing it to whisper.
-    // Without the conversion, whisper interprets device-rate stereo
-    // samples as 16kHz mono and hallucinates garbage.
+    // After join: raw audio (device rate, multi-channel) is in final_audio.
+    // The un-transcribed tail is the slice after `last_transcribed_raw_len`.
     let raw_samples = session.take_final_audio();
-    let samples = dictation::convert_to_mono_16k(&raw_samples, channels, source_rate);
+    let total_raw = raw_samples.len();
+    let raw_samples_per_second = (source_rate as usize) * (channels as usize);
+
+    // Align the tail boundary to a frame to keep channel interleaving correct.
+    let tail_start = if channels > 0 {
+        let aligned = (last_transcribed_raw_len / channels as usize) * channels as usize;
+        aligned.min(total_raw)
+    } else {
+        last_transcribed_raw_len.min(total_raw)
+    };
+
+    let tail_raw_len = total_raw - tail_start;
+    let tail_seconds = if raw_samples_per_second > 0 {
+        tail_raw_len as f64 / raw_samples_per_second as f64
+    } else {
+        0.0
+    };
+
     eprintln!(
-        "[martin] stop_dictation raw={} samples mono16k={} samples (~{:.1}s)",
-        raw_samples.len(),
-        samples.len(),
-        samples.len() as f64 / 16000.0
+        "[martin] stop_dictation raw={} last_transcribed={} tail={} (~{:.1}s) pending_para={}",
+        total_raw, last_transcribed_raw_len, tail_raw_len, tail_seconds, pending_paragraph_break
     );
 
-    // last_full_text: best-effort transcription up to the last live poll
-    // (covers all audio so far, including post-rollover). Used as the
-    // text shown in the partial row for crash recovery.
+    // last_full_text: best-effort transcription up to the last successful
+    // pass (or up to the last rollover — the loop keeps this current).
     let last_full = session
         .last_full_text()
         .lock()
         .map(|s| s.clone())
         .unwrap_or_default();
 
-    // Worker seed: ONLY committed (rolled-over) segments. The audio
-    // handed off in `samples` is post-rollover, so the finalize whisper
-    // pass will produce text for that. Seeding `acc` with `last_full`
-    // would double-count the post-rollover portion.
-    let worker_seed = session
-        .committed()
-        .lock()
-        .map(|c| c.join(" ").trim().to_string())
-        .unwrap_or_default();
-
     *dictation_guard = None;
     drop(dictation_guard);
 
-    let partial_text = if !last_full.trim().is_empty() {
-        last_full.trim().to_string()
-    } else {
-        worker_seed.clone()
-    };
-
-    let id = {
+    let id = partial_id;
+    {
         let store = state.store.lock().map_err(|e| e.to_string())?;
-        let new_id = store.insert_partial(&title, &language)?;
-        if !partial_text.is_empty() {
-            store.update_text(new_id, &partial_text, duration_secs)?;
+        store.update_title(id, &title)?;
+        if !last_full.trim().is_empty() {
+            store.update_text(id, last_full.trim(), duration_secs)?;
         }
-        new_id
-    };
+    }
 
-    // Fast path: if the live transcription loop already produced text
-    // for this audio, skip the finalize whisper pass entirely. The live
-    // loop and finalize use identical params on identical audio — running
-    // whisper a second time is duplicated work that turns into minutes
-    // of wait on slow machines and risks OOM (whisper error -6 is
-    // typically encode failure under memory pressure).
-    if !last_full.trim().is_empty() {
+    // Fast path: tail is short (well under MIN_FINALIZE_SAMPLES) — last_full
+    // already captures everything that mattered. Skip the finalize whisper pass.
+    // This avoids a duplicate whisper run when the live loop kept up.
+    if tail_seconds < 1.0 {
         eprintln!(
-            "[martin] stop_dictation fast path: live text complete ({} chars), skipping finalize pass",
+            "[martin] stop_dictation fast path: tail < 1s ({} chars in last_full), skipping finalize",
             last_full.trim().len()
         );
-        let final_text = last_full.trim().to_string();
+        let final_text = crate::postprocess::normalize(last_full.trim());
         let transcription = {
             let store = state.store.lock().map_err(|e| e.to_string())?;
             store.update_text(id, &final_text, duration_secs)?;
@@ -462,8 +502,6 @@ async fn stop_dictation(
             store.get(id)?
         };
 
-        // current_job was never set on the fast path — drop the guard
-        // so it is released cleanly.
         drop(job_guard);
 
         #[derive(Clone, serde::Serialize)]
@@ -478,9 +516,31 @@ async fn stop_dictation(
         return Ok(id);
     }
 
+    // Slow path: we have un-transcribed tail audio. Run whisper ONLY on the
+    // tail, then prepend `last_full` (which already covers everything before
+    // the tail). The trailing separator decides whether tail starts a new
+    // paragraph (paragraph rollover happened) or continues the current one.
+    let tail_raw: Vec<f32> = raw_samples[tail_start..].to_vec();
+    let tail_samples = dictation::convert_to_mono_16k(&tail_raw, channels, source_rate);
+    eprintln!(
+        "[martin] stop_dictation slow path: tail mono16k={} samples (~{:.1}s)",
+        tail_samples.len(),
+        tail_samples.len() as f64 / 16000.0
+    );
+
+    let last_full_trimmed = last_full.trim_end().to_string();
+    let committed_prefix = if last_full_trimmed.is_empty() {
+        String::new()
+    } else if pending_paragraph_break {
+        format!("{}\n\n", last_full_trimmed)
+    } else {
+        format!("{} ", last_full_trimmed)
+    };
+
     let mut job = TranscriptionJob::new(id, JobKind::Dictation);
-    job.committed_text = worker_seed;
+    job.committed_text = committed_prefix;
     let job_id = job.id;
+    let samples = tail_samples;
 
     *job_guard = Some(job.clone());
     drop(job_guard);

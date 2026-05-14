@@ -45,6 +45,10 @@ const translations = {
     cancelConfirmNo: "Voltar",
     navLockedTooltip: "Aguarde a transcrição terminar",
     partialBadge: "Parcial",
+    stateListening: "Ouvindo",
+    stateProcessing: "Processando",
+    statePaused: "Pausa detectada",
+    provisionalHint: "Texto cinza ainda pode ser revisado; texto preto já está confirmado.",
   },
   en: {
     record: "Record",
@@ -92,6 +96,10 @@ const translations = {
     cancelConfirmNo: "Back",
     navLockedTooltip: "Wait for the transcription to finish",
     partialBadge: "Partial",
+    stateListening: "Listening",
+    stateProcessing: "Processing",
+    statePaused: "Paused",
+    provisionalHint: "Gray text may still be refined; black text is confirmed.",
   },
 };
 

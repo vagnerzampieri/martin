@@ -16,11 +16,27 @@ impl Transcriber {
         Ok(Self { ctx })
     }
 
+    /// Pick how many threads whisper should use. Cap at 8 — whisper.cpp's matmul
+    /// kernels scale poorly past that, and over-subscription on weak machines
+    /// (where dictation lives) actively hurts. Floor at 1 so the caller can pass
+    /// `0` from `available_parallelism().get().saturating_sub(...)`.
+    pub fn whisper_thread_count_for(physical_cores: usize) -> i32 {
+        physical_cores.clamp(1, 8) as i32
+    }
+
+    fn default_thread_count() -> i32 {
+        let cores = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+        Self::whisper_thread_count_for(cores)
+    }
+
     #[allow(dead_code)]
     pub fn transcribe(&self, audio_path: &Path, language: &str) -> Result<String, String> {
         let samples = Self::load_wav_as_mono_f32(audio_path)?;
 
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+        params.set_n_threads(Self::default_thread_count());
         params.set_language(Some(language));
         params.set_print_special(false);
         params.set_print_progress(false);
@@ -52,6 +68,7 @@ impl Transcriber {
     /// Used by dictation mode where audio comes from a buffer, not a file.
     pub fn transcribe_samples(&self, samples: &[f32], language: &str) -> Result<String, String> {
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+        params.set_n_threads(Self::default_thread_count());
         params.set_language(Some(language));
         params.set_print_special(false);
         params.set_print_progress(false);
@@ -107,6 +124,7 @@ impl Transcriber {
         A: FnMut() -> bool + Send + 'static,
     {
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+        params.set_n_threads(Self::default_thread_count());
         params.set_language(Some(language));
         params.set_print_special(false);
         params.set_print_progress(false);
@@ -383,5 +401,15 @@ mod tests {
                 t.transcribe_with_callbacks(samples, "pt", |_p: i32| {}, |_seg: &str| {}, || false);
         }
         let _ = _sig_check;
+    }
+
+    #[test]
+    fn whisper_thread_count_caps_at_eight_and_floors_at_one() {
+        assert_eq!(Transcriber::whisper_thread_count_for(0), 1);
+        assert_eq!(Transcriber::whisper_thread_count_for(1), 1);
+        assert_eq!(Transcriber::whisper_thread_count_for(4), 4);
+        assert_eq!(Transcriber::whisper_thread_count_for(8), 8);
+        assert_eq!(Transcriber::whisper_thread_count_for(16), 8);
+        assert_eq!(Transcriber::whisper_thread_count_for(64), 8);
     }
 }

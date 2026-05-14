@@ -6,13 +6,17 @@ Two modes: **Record** meetings with dual audio capture (mic + system), or **Dict
 
 ## Screenshots
 
-| Recorder | History |
-|----------|---------|
-| ![Recorder](docs/images/recorder.png) | ![History](docs/images/history.png) |
+| Recorder | Recording in progress |
+|----------|-----------------------|
+| ![Recorder](docs/images/recorder.png) | ![Recording](docs/images/recorder-recording.png) |
 
-| Summary |
-|---------|
-| ![Summary](docs/images/summary.png) |
+| Pending recordings | Finalizing transcription |
+|--------------------|--------------------------|
+| ![Pending](docs/images/recorder-pending.png) | ![Finalizing](docs/images/finalizing.png) |
+
+| History | Summary |
+|---------|---------|
+| ![History](docs/images/history.png) | ![Summary](docs/images/summary.png) |
 
 ## Features
 
@@ -24,8 +28,15 @@ Two modes: **Record** meetings with dual audio capture (mic + system), or **Dict
 ### Dictation mode
 - **Real-time transcription** — speaks and sees text appear live as you talk
 - **Mic-only capture** — uses microphone directly, no system audio needed
-- **Sliding window** — transcribes accumulated audio every ~5 seconds, re-processing the full buffer for better accuracy
-- **Auto-save** — on stop, the full transcription is saved to history with title and duration
+- **Three-state indicator** — Listening / Processing / Paused, so you know what the app is doing
+- **VU meter** — visual confirmation that the microphone is picking up your voice
+- **Provisional vs stable text** — recently transcribed text shown in gray italic (may still be refined), confirmed text in normal style
+- **Automatic paragraphs** — long pauses (>2.5s) become paragraph breaks in the output
+- **Voice formatting commands** — say "novo parágrafo", "nova linha", "ponto final", "vírgula", "ponto de interrogação", "ponto de exclamação", "abre aspas", "fecha aspas" to insert formatting
+- **Smart capitalization** — sentences are capitalized automatically and punctuation spacing is normalized
+- **Silence-aware** — skips whisper passes during silence to save CPU
+- **Continuous auto-save** — partial transcript is persisted every 5 seconds; nothing is lost if the app crashes
+- **Audio preserved** — raw mic audio is saved as a WAV alongside the transcript so you can reprocess later if needed
 
 ### General
 - **Auto-download model** — Whisper model downloads automatically on first use, with progress bar
@@ -94,6 +105,31 @@ You can record multiple times before transcribing — each recording is tracked 
 3. Speak — text appears in real time as you talk
 4. Click **Stop Dictation** / **Parar Ditado** — the full text is saved to history
 
+### Voice commands (Portuguese)
+
+Speak these phrases mid-dictation to insert punctuation or formatting.
+Matching is **case-insensitive** and **accent-insensitive** — `novo paragrafo`
+works the same as `novo parágrafo`, and Whisper dropping a diacritic
+does not break the command.
+
+| Say (PT)                                   | Produces  |
+|--------------------------------------------|-----------|
+| `novo parágrafo` *or* `ponto parágrafo`    | new paragraph (`\n\n`) |
+| `nova linha`                               | newline (`\n`) |
+| `ponto final`                              | `.`       |
+| `vírgula`                                  | `,`       |
+| `ponto de interrogação`                    | `?`       |
+| `ponto de exclamação`                      | `!`       |
+| `abre aspas`                               | `"` (opening) |
+| `fecha aspas`                              | `"` (closing) |
+
+The dictation also reacts to silence:
+
+- A pause of **~2 seconds** flips the UI state to **Pausa detectada**
+  (no other effect — speak again and it resumes)
+- A pause of **~5 seconds** commits the current text and starts a new
+  paragraph automatically — useful when you stop to think between thoughts
+
 ## How audio capture works
 
 ### Recording mode
@@ -110,9 +146,14 @@ When you stop recording, both WAV files are mixed into a single file. If PipeWir
 Captures microphone audio via cpal and transcribes in real time:
 
 - Audio streams into a shared buffer at the device's native sample rate
-- Every ~5 seconds, the full accumulated buffer is converted to mono 16kHz and sent to Whisper
-- Results are emitted as Tauri events (`dictation://segment`) and displayed live in the UI
-- When the buffer exceeds 120 seconds, the current segment is committed and a new buffer starts
+- A second thread emits the audio level (`dictation://level`) and session state (`dictation://state`, one of `listening`/`processing`/`paused`) for UI feedback
+- Every ~500ms, the transcription loop drains new samples, measures RMS, and skips the whisper pass if the chunk is silent
+- When there is enough new audio, the full accumulated buffer is converted to mono 16kHz and sent to Whisper for re-transcription (this is what keeps the output accurate — Whisper self-corrects with more context)
+- The output passes through a text-normalization pipeline (voice command substitution → punctuation spacing → whitespace collapse → sentence capitalization) before being emitted
+- A pause longer than ~2.5s commits the current text as a segment and inserts a paragraph break (`\n\n`) before the next segment
+- When the buffer exceeds 120 seconds, the current segment is committed (reusing the last transcription) and a new buffer starts
+- The mic audio is written to a WAV file in real time, so the audio is available for reprocessing after the session ends
+- The partial transcription row is created on `Start Dictation` and updated every ~5s during the session; on `Stop Dictation` the same row is finalized
 
 ## Whisper Models
 
@@ -129,7 +170,7 @@ Download with: `./scripts/download-model.sh <model>`
 
 ```bash
 cargo tauri dev          # Full app dev mode with hot reload
-cargo test               # Run Rust tests (37 tests)
+cargo test               # Run Rust tests
 npm run check            # Svelte/TypeScript type checking
 cargo fmt                # Format Rust code
 cargo clippy             # Lint Rust code
@@ -143,21 +184,27 @@ src-tauri/src/
 ├── audio/
 │   ├── capture.rs      # Mic (cpal) + system audio (pw-record)
 │   ├── mix.rs          # WAV mixing (mic + system → single file)
-│   └── wav_writer.rs   # Thread-safe WAV writer
+│   └── wav_writer.rs   # Thread-safe WAV writer (used by recorder and dictation)
 ├── db/
 │   └── store.rs        # SQLite CRUD for transcriptions + pending recordings
-├── dictation.rs        # Real-time mic capture + transcription loop
+├── dictation.rs        # Real-time mic capture + transcription loop + level/state emitter
 ├── model.rs            # Auto-download Whisper model with progress events
+├── postprocess.rs      # Pure text normalization: voice commands, spacing, capitalization
 ├── summarize.rs        # Claude CLI integration for AI summaries
+├── vad.rs              # Pure RMS-based silence detection helpers
 └── transcribe/
-    └── whisper.rs      # Whisper transcription + WAV loading + resampling
+    ├── whisper.rs      # Whisper transcription + WAV loading + resampling
+    └── job.rs          # Finalize worker + cancel/progress orchestration
 
 src/
 ├── lib/
 │   ├── i18n.js         # Locale detection + translations (pt/en)
 │   ├── format.js       # Shared date/duration formatting
+│   ├── appBusy.js      # Cross-tab "app busy" store
 │   ├── Recorder.svelte # Recording controls + pending recordings list
-│   ├── Dictation.svelte # Real-time dictation with live text display
+│   ├── Dictation.svelte # Real-time dictation with state/level/provisional UI
+│   ├── VuMeter.svelte  # Audio-level meter component
+│   ├── FinalizingProgress.svelte # Progress overlay for finalize phase
 │   ├── ModelDownload.svelte # Model download progress overlay
 │   ├── History.svelte  # Transcription list
 │   └── TranscriptionView.svelte  # View + copy + summarize
