@@ -320,7 +320,12 @@ async fn start_dictation(
         .map_err(|e| format!("Model check failed: {}", e))??;
 
     let mut session = DictationSession::new();
-    session.start()?;
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| format!("System clock error: {}", e))?
+        .as_millis();
+    let audio_path = state.data_dir.join(format!("dictation_{}.wav", timestamp));
+    session.start(audio_path)?;
 
     let buffer = session.buffer();
     let running = session.running_flag();

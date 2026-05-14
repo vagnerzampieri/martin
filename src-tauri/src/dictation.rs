@@ -7,6 +7,8 @@ use std::thread::JoinHandle;
 use tauri::Emitter;
 
 use crate::transcribe::whisper::Transcriber;
+use crate::audio::wav_writer::AudioWavWriter;
+use std::path::PathBuf;
 
 /// Externally visible dictation state. Encoded as `u8` so it can live in an
 /// `AtomicU8` shared between the capture, transcription, and level-poller threads.
@@ -45,6 +47,8 @@ pub struct DictationSession {
     state: Arc<AtomicU8>,
     worker: Option<JoinHandle<()>>,
     level_worker: Option<JoinHandle<()>>,
+    wav_writer: Option<AudioWavWriter>,
+    audio_path: Option<PathBuf>,
 }
 
 // SAFETY: DictationSession contains cpal::Stream which is !Send.
@@ -66,6 +70,8 @@ impl DictationSession {
             state: Arc::new(AtomicU8::new(STATE_LISTENING)),
             worker: None,
             level_worker: None,
+            wav_writer: None,
+            audio_path: None,
         }
     }
 
@@ -81,7 +87,7 @@ impl DictationSession {
         self.running.clone()
     }
 
-    pub fn start(&mut self) -> Result<(), String> {
+    pub fn start(&mut self, audio_path: PathBuf) -> Result<(), String> {
         let host = cpal::default_host();
         let device = host
             .default_input_device()
@@ -96,8 +102,15 @@ impl DictationSession {
         let sample_format = config.sample_format();
         let buffer = self.audio_buffer.clone();
 
+        let writer = AudioWavWriter::new(&audio_path, self.source_rate, self.channels)?;
+        let writer_handle = writer.writer_handle();
+        self.wav_writer = Some(writer);
+        self.audio_path = Some(audio_path);
+
         let peak_for_i16 = self.last_peak_bits.clone();
         let peak_for_f32 = self.last_peak_bits.clone();
+        let writer_i16 = writer_handle.clone();
+        let writer_f32 = writer_handle.clone();
         let stream = match sample_format {
             SampleFormat::I16 => device
                 .build_input_stream(
@@ -115,6 +128,13 @@ impl DictationSession {
                             }
                         }
                         peak_for_i16.store(peak.to_bits(), Ordering::Relaxed);
+                        if let Ok(mut guard) = writer_i16.lock() {
+                            if let Some(ref mut w) = *guard {
+                                for &s in data {
+                                    let _ = w.write_sample(s);
+                                }
+                            }
+                        }
                     },
                     |err| eprintln!("Dictation stream error: {}", err),
                     None,
@@ -135,6 +155,14 @@ impl DictationSession {
                             }
                         }
                         peak_for_f32.store(peak.to_bits(), Ordering::Relaxed);
+                        if let Ok(mut guard) = writer_f32.lock() {
+                            if let Some(ref mut w) = *guard {
+                                for &s in data {
+                                    #[allow(clippy::cast_possible_truncation)]
+                                    let _ = w.write_sample((s * i16::MAX as f32) as i16);
+                                }
+                            }
+                        }
                     },
                     |err| eprintln!("Dictation stream error: {}", err),
                     None,
@@ -204,6 +232,16 @@ impl DictationSession {
         if let Some(handle) = self.level_worker.take() {
             let _ = handle.join();
         }
+        if let Some(writer) = self.wav_writer.take() {
+            if let Err(e) = writer.finalize() {
+                eprintln!("[dictation] failed to finalize WAV: {}", e);
+            }
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn audio_path(&self) -> Option<PathBuf> {
+        self.audio_path.clone()
     }
 
     /// Take ownership of the audio captured since the last rollover.
