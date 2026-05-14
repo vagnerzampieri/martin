@@ -101,6 +101,31 @@ You can record multiple times before transcribing — each recording is tracked 
 3. Speak — text appears in real time as you talk
 4. Click **Stop Dictation** / **Parar Ditado** — the full text is saved to history
 
+### Voice commands (Portuguese)
+
+Speak these phrases mid-dictation to insert punctuation or formatting.
+Matching is **case-insensitive** and **accent-insensitive** — `novo paragrafo`
+works the same as `novo parágrafo`, and Whisper dropping a diacritic
+does not break the command.
+
+| Say (PT)                                   | Produces  |
+|--------------------------------------------|-----------|
+| `novo parágrafo` *or* `ponto parágrafo`    | new paragraph (`\n\n`) |
+| `nova linha`                               | newline (`\n`) |
+| `ponto final`                              | `.`       |
+| `vírgula`                                  | `,`       |
+| `ponto de interrogação`                    | `?`       |
+| `ponto de exclamação`                      | `!`       |
+| `abre aspas`                               | `"` (opening) |
+| `fecha aspas`                              | `"` (closing) |
+
+The dictation also reacts to silence:
+
+- A pause of **~2 seconds** flips the UI state to **Pausa detectada**
+  (no other effect — speak again and it resumes)
+- A pause of **~5 seconds** commits the current text and starts a new
+  paragraph automatically — useful when you stop to think between thoughts
+
 ## How audio capture works
 
 ### Recording mode
