@@ -249,42 +249,39 @@ pub fn run_transcription_loop(
         let mono_16k = convert_to_mono_16k(&accumulated_raw, channels, source_rate);
         last_transcribed_len = accumulated_raw.len();
 
-        match transcriber.transcribe_samples(&mono_16k, language) {
-            Ok(text) => {
-                let text = text.trim().to_string();
-                if !text.is_empty() {
-                    let full_text = if committed_segments.is_empty() {
-                        text.clone()
-                    } else {
-                        format!("{} {}", committed_segments.join(" "), text)
-                    };
-                    let _ = app_handle.emit(
-                        "dictation://segment",
-                        serde_json::json!({
-                            "text": text,
-                            "fullText": full_text,
-                        }),
-                    );
-                    if let Ok(mut last) = last_full_text_out.lock() {
-                        *last = full_text.clone();
-                    }
-                }
-            }
+        let pass_text = match transcriber.transcribe_samples(&mono_16k, language) {
+            Ok(text) => text.trim().to_string(),
             Err(e) => {
                 eprintln!("Dictation transcription error: {}", e);
+                String::new()
+            }
+        };
+
+        if !pass_text.is_empty() {
+            let full_text = if committed_segments.is_empty() {
+                pass_text.clone()
+            } else {
+                format!("{} {}", committed_segments.join(" "), pass_text)
+            };
+            let _ = app_handle.emit(
+                "dictation://segment",
+                serde_json::json!({
+                    "text": pass_text,
+                    "fullText": full_text,
+                }),
+            );
+            if let Ok(mut last) = last_full_text_out.lock() {
+                *last = full_text.clone();
             }
         }
 
-        // If buffer exceeds max, commit current transcription and start fresh
+        // If buffer exceeds max, commit the text we just produced and start fresh.
+        // Reusing `pass_text` avoids a second whisper pass on the same audio.
         if accumulated_raw.len() > max_raw_samples {
-            let mono_16k = convert_to_mono_16k(&accumulated_raw, channels, source_rate);
-            if let Ok(text) = transcriber.transcribe_samples(&mono_16k, language) {
-                let text = text.trim().to_string();
-                if !text.is_empty() {
-                    committed_segments.push(text.clone());
-                    if let Ok(mut sink) = committed_out.lock() {
-                        sink.push(text);
-                    }
+            if !pass_text.is_empty() {
+                committed_segments.push(pass_text.clone());
+                if let Ok(mut sink) = committed_out.lock() {
+                    sink.push(pass_text);
                 }
             }
             accumulated_raw.clear();
