@@ -6,13 +6,17 @@ Two modes: **Record** meetings with dual audio capture (mic + system), or **Dict
 
 ## Screenshots
 
-| Recorder | History |
-|----------|---------|
-| ![Recorder](docs/images/recorder.png) | ![History](docs/images/history.png) |
+| Recorder | Recording in progress |
+|----------|-----------------------|
+| ![Recorder](docs/images/recorder.png) | ![Recording](docs/images/recorder-recording.png) |
 
-| Summary |
-|---------|
-| ![Summary](docs/images/summary.png) |
+| Pending recordings | Finalizing transcription |
+|--------------------|--------------------------|
+| ![Pending](docs/images/recorder-pending.png) | ![Finalizing](docs/images/finalizing.png) |
+
+| History | Summary |
+|---------|---------|
+| ![History](docs/images/history.png) | ![Summary](docs/images/summary.png) |
 
 ## Features
 
