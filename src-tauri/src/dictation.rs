@@ -1,12 +1,27 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, Stream};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 use tauri::Emitter;
 
 use crate::transcribe::whisper::Transcriber;
+
+/// Externally visible dictation state. Encoded as `u8` so it can live in an
+/// `AtomicU8` shared between the capture, transcription, and level-poller threads.
+/// Values are stable — the frontend depends on them.
+pub const STATE_LISTENING: u8 = 0;
+pub const STATE_PROCESSING: u8 = 1;
+pub const STATE_PAUSED: u8 = 2;
+
+pub fn state_label(state: u8) -> &'static str {
+    match state {
+        STATE_PROCESSING => "processing",
+        STATE_PAUSED => "paused",
+        _ => "listening",
+    }
+}
 
 const WHISPER_SAMPLE_RATE: u32 = 16000;
 const POLL_INTERVAL_MS: u64 = 500;
@@ -21,11 +36,14 @@ pub struct DictationSession {
     channels: u16,
     committed: Arc<Mutex<Vec<String>>>,
     last_full_text: Arc<Mutex<String>>,
-    // Audio captured since the last rollover, handed off by the live
-    // transcription loop on exit so stop_dictation can re-transcribe
-    // it with the new finalize path.
     final_audio: Arc<Mutex<Vec<f32>>>,
+    /// Last-known peak amplitude of the audio callback, as f32 bits in u32.
+    /// Updated by the cpal callback, read by the level-poller thread.
+    last_peak_bits: Arc<AtomicU32>,
+    /// Current session state (see `STATE_*` constants).
+    state: Arc<AtomicU8>,
     worker: Option<JoinHandle<()>>,
+    level_worker: Option<JoinHandle<()>>,
 }
 
 // SAFETY: DictationSession contains cpal::Stream which is !Send.
@@ -43,7 +61,10 @@ impl DictationSession {
             committed: Arc::new(Mutex::new(Vec::new())),
             last_full_text: Arc::new(Mutex::new(String::new())),
             final_audio: Arc::new(Mutex::new(Vec::new())),
+            last_peak_bits: Arc::new(AtomicU32::new(0)),
+            state: Arc::new(AtomicU8::new(STATE_LISTENING)),
             worker: None,
+            level_worker: None,
         }
     }
 
@@ -74,16 +95,25 @@ impl DictationSession {
         let sample_format = config.sample_format();
         let buffer = self.audio_buffer.clone();
 
-        // Callback stores raw f32 samples. Mono conversion + resampling
-        // happens in the transcription loop to keep the callback fast.
+        let peak_for_i16 = self.last_peak_bits.clone();
+        let peak_for_f32 = self.last_peak_bits.clone();
         let stream = match sample_format {
             SampleFormat::I16 => device
                 .build_input_stream(
                     &config.into(),
                     move |data: &[i16], _| {
+                        let mut peak: f32 = 0.0;
                         if let Ok(mut buf) = buffer.lock() {
-                            buf.extend(data.iter().map(|&s| s as f32 / i16::MAX as f32));
+                            for &s in data {
+                                let f = s as f32 / i16::MAX as f32;
+                                let a = f.abs();
+                                if a > peak {
+                                    peak = a;
+                                }
+                                buf.push(f);
+                            }
                         }
+                        peak_for_i16.store(peak.to_bits(), Ordering::Relaxed);
                     },
                     |err| eprintln!("Dictation stream error: {}", err),
                     None,
@@ -93,9 +123,17 @@ impl DictationSession {
                 .build_input_stream(
                     &config.into(),
                     move |data: &[f32], _| {
+                        let mut peak: f32 = 0.0;
                         if let Ok(mut buf) = buffer.lock() {
-                            buf.extend_from_slice(data);
+                            for &s in data {
+                                let a = s.abs();
+                                if a > peak {
+                                    peak = a;
+                                }
+                                buf.push(s);
+                            }
                         }
+                        peak_for_f32.store(peak.to_bits(), Ordering::Relaxed);
                     },
                     |err| eprintln!("Dictation stream error: {}", err),
                     None,
@@ -139,17 +177,30 @@ impl DictationSession {
         self.final_audio.clone()
     }
 
+    pub fn last_peak_bits(&self) -> Arc<AtomicU32> {
+        self.last_peak_bits.clone()
+    }
+
+    pub fn state(&self) -> Arc<AtomicU8> {
+        self.state.clone()
+    }
+
     pub fn set_worker(&mut self, handle: JoinHandle<()>) {
         self.worker = Some(handle);
     }
 
-    /// Stops the audio stream, signals the worker, and joins it.
-    /// Returns only after the worker has fully exited — at which point
-    /// `take_final_audio` is safe to call.
+    pub fn set_level_worker(&mut self, handle: JoinHandle<()>) {
+        self.level_worker = Some(handle);
+    }
+
+    /// Stops the audio stream, signals workers, and joins them.
     pub fn stop_and_join(&mut self) {
         self.running.store(false, Ordering::Release);
         self.stream.take();
         if let Some(handle) = self.worker.take() {
+            let _ = handle.join();
+        }
+        if let Some(handle) = self.level_worker.take() {
             let _ = handle.join();
         }
     }
