@@ -245,8 +245,31 @@ pub fn run_finalize_dictation(
             FinalizeOutcome::Cancelled
         }
         Err(e) => {
-            eprintln!("[finalize id={}] error: {}", id, e);
-            FinalizeOutcome::Error(e)
+            // Whisper failure (commonly error -6 = encode/memory pressure on
+            // slow machines). If we already have accumulated text — either
+            // from segments produced before the failure OR from the prefix we
+            // started with — complete with that text. Losing the un-transcribed
+            // tail is strictly better than discarding the whole dictation.
+            let fallback = accumulated
+                .lock()
+                .map(|a| a.clone())
+                .unwrap_or_else(|_| committed_prefix.clone());
+            if fallback.trim().is_empty() {
+                eprintln!("[finalize id={}] error: {} (no fallback text)", id, e);
+                FinalizeOutcome::Error(e)
+            } else {
+                eprintln!(
+                    "[finalize id={}] error: {} — completing with fallback text ({} chars)",
+                    id,
+                    e,
+                    fallback.trim().len()
+                );
+                let final_text = crate::postprocess::normalize(&fallback);
+                FinalizeOutcome::Complete {
+                    final_text,
+                    duration_secs,
+                }
+            }
         }
     }
 }
