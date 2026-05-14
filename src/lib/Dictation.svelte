@@ -5,17 +5,22 @@
     import { t, locale } from "./i18n.js";
     import { appBusy } from "./appBusy.js";
     import FinalizingProgress from "./FinalizingProgress.svelte";
+    import VuMeter from "./VuMeter.svelte";
 
     let { onTranscribed } = $props();
 
     /** @type {"idle" | "recording" | "finalizing" | "cancelling"} */
     let phase = $state("idle");
     let error = $state("");
-    let liveText = $state("");
+    let stableText = $state("");
+    let provisionalText = $state("");
+    let liveText = $state(""); // legacy single-string view used during finalize
     let elapsed = $state(0);
     let percent = $state(0);
     let recordedDurationLabel = $state("");
-    /** @type {number | null} */
+    let peak = $state(0);
+    /** @type {"listening" | "processing" | "paused"} */
+    let dictationState = $state("listening");
     let partialId = $state(null);
     /** @type {ReturnType<typeof setInterval> | null} */
     let timer = null;
@@ -27,18 +32,36 @@
         return phase === "finalizing" || phase === "cancelling";
     }
 
+    function stateClass(/** @type {"listening" | "processing" | "paused"} */ s) {
+        if (s === "processing") return "state-processing";
+        if (s === "paused") return "state-paused";
+        return "state-listening";
+    }
+
+    function stateLabel(/** @type {"listening" | "processing" | "paused"} */ s) {
+        if (s === "processing") return t("stateProcessing");
+        if (s === "paused") return t("statePaused");
+        return t("stateListening");
+    }
+
     onMount(async () => {
         unlisteners.push(
             await listen("dictation://segment", (event) => {
                 if (phase !== "recording") return;
-                liveText = event.payload.fullText;
+                stableText = event.payload.stableText ?? "";
+                provisionalText = event.payload.provisionalText ?? "";
+                liveText = event.payload.fullText ?? "";
+            }),
+            await listen("dictation://level", (event) => {
+                if (phase !== "recording") return;
+                peak = event.payload.peak ?? 0;
+            }),
+            await listen("dictation://state", (event) => {
+                if (phase !== "recording") return;
+                dictationState = event.payload.state ?? "listening";
             }),
             await listen("transcription://text", (event) => {
                 if (!isFinalizing()) return;
-                // Only overwrite if the worker's accumulated text has
-                // surpassed the live-loop text we already have. Otherwise
-                // we'd flash a regressing liveText (worker starts empty
-                // and grows back, which felt like the text disappeared).
                 const incoming = event.payload.text ?? "";
                 if (incoming.length > liveText.length) {
                     liveText = incoming;
@@ -54,8 +77,12 @@
                 setTimeout(() => {
                     phase = "idle";
                     appBusy.set(false);
+                    stableText = "";
+                    provisionalText = "";
                     liveText = "";
                     percent = 0;
+                    peak = 0;
+                    dictationState = "listening";
                     recordedDurationLabel = "";
                 }, 250);
                 onTranscribed?.(event.payload.transcription);
@@ -64,8 +91,12 @@
                 if (!isFinalizing()) return;
                 phase = "idle";
                 appBusy.set(false);
+                stableText = "";
+                provisionalText = "";
                 liveText = "";
                 percent = 0;
+                peak = 0;
+                dictationState = "listening";
                 recordedDurationLabel = "";
             }),
             await listen("transcription://error", (event) => {
@@ -139,15 +170,19 @@
 
 <div class="dictation">
     {#if phase === "recording"}
-        <div class="status dictating">
+        <div class="status {stateClass(dictationState)}">
             <span class="dot"></span>
-            {t("dictating")} {formatTime(elapsed)}
+            {stateLabel(dictationState)} · {formatTime(elapsed)}
         </div>
+        <VuMeter {peak} />
         <button class="btn-stop" onclick={stopDictation}>
             {t("stopDictation")}
         </button>
-        {#if liveText}
-            <div class="live-text"><pre>{liveText}</pre></div>
+        {#if stableText || provisionalText}
+            <div class="live-text">
+                <pre><span class="stable">{stableText}</span>{#if stableText && provisionalText}{" "}{/if}<span class="provisional">{provisionalText}</span></pre>
+                <small class="hint">{t("provisionalHint")}</small>
+            </div>
         {/if}
     {:else if phase === "finalizing" || phase === "cancelling"}
         <FinalizingProgress
@@ -184,12 +219,10 @@
         gap: 8px;
     }
 
-    .dictating .dot {
+    .status .dot {
         width: 12px;
         height: 12px;
-        background: var(--info);
         border-radius: 50%;
-        animation: pulse 1s infinite;
     }
 
     @keyframes pulse {
@@ -238,5 +271,33 @@
         line-height: 1.6;
         max-height: 50vh;
         overflow-y: auto;
+    }
+
+    .state-listening .dot {
+        background: var(--info);
+        animation: pulse 1.4s infinite;
+    }
+    .state-processing .dot {
+        background: var(--accent);
+        animation: pulse 0.7s infinite;
+    }
+    .state-paused .dot {
+        background: var(--border);
+        animation: none;
+        opacity: 0.6;
+    }
+
+    .live-text pre .stable {
+        color: var(--text);
+    }
+    .live-text pre .provisional {
+        color: var(--muted, #888);
+        font-style: italic;
+    }
+    .live-text .hint {
+        display: block;
+        margin-top: 8px;
+        font-size: 0.8rem;
+        color: var(--muted, #888);
     }
 </style>
