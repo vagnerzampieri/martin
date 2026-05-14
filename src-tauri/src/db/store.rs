@@ -12,6 +12,7 @@ pub struct Transcription {
     pub created_at: String,
     pub summary: Option<String>,
     pub status: String,
+    pub audio_path: Option<String>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -71,6 +72,17 @@ impl Store {
             Err(rusqlite::Error::SqliteFailure(_, Some(msg)))
                 if msg.contains("duplicate column name") => {}
             Err(e) => return Err(format!("Failed to add status column: {}", e)),
+        }
+
+        let audio_path_migration = conn.execute(
+            "ALTER TABLE transcriptions ADD COLUMN audio_path TEXT",
+            [],
+        );
+        match audio_path_migration {
+            Ok(_) => {}
+            Err(rusqlite::Error::SqliteFailure(_, Some(msg)))
+                if msg.contains("duplicate column name") => {}
+            Err(e) => return Err(format!("Failed to add audio_path column: {}", e)),
         }
 
         Ok(Self { conn })
@@ -133,6 +145,21 @@ impl Store {
         Ok(())
     }
 
+    #[allow(dead_code)]
+    pub fn set_audio_path(&self, id: i64, audio_path: &str) -> Result<(), String> {
+        let affected = self
+            .conn
+            .execute(
+                "UPDATE transcriptions SET audio_path = ?1 WHERE id = ?2",
+                params![audio_path, id],
+            )
+            .map_err(|e| format!("Failed to set audio_path: {}", e))?;
+        if affected == 0 {
+            return Err(format!("Transcription with id {} not found", id));
+        }
+        Ok(())
+    }
+
     /// Removes partial rows that have no text and no duration — these can only
     /// come from a force-kill that happened before the first segment callback
     /// fired. Returns the number of rows deleted.
@@ -150,7 +177,7 @@ impl Store {
     pub fn list(&self) -> Result<Vec<Transcription>, String> {
         let mut stmt = self
             .conn
-            .prepare("SELECT id, title, text, language, duration_secs, created_at, summary, status FROM transcriptions ORDER BY created_at DESC")
+            .prepare("SELECT id, title, text, language, duration_secs, created_at, summary, status, audio_path FROM transcriptions ORDER BY created_at DESC")
             .map_err(|e| format!("Failed to prepare query: {}", e))?;
 
         let rows = stmt
@@ -164,6 +191,7 @@ impl Store {
                     created_at: row.get(5)?,
                     summary: row.get(6)?,
                     status: row.get(7)?,
+                    audio_path: row.get(8)?,
                 })
             })
             .map_err(|e| format!("Failed to query: {}", e))?;
@@ -175,7 +203,7 @@ impl Store {
     pub fn get(&self, id: i64) -> Result<Transcription, String> {
         self.conn
             .query_row(
-                "SELECT id, title, text, language, duration_secs, created_at, summary, status FROM transcriptions WHERE id = ?1",
+                "SELECT id, title, text, language, duration_secs, created_at, summary, status, audio_path FROM transcriptions WHERE id = ?1",
                 params![id],
                 |row| {
                     Ok(Transcription {
@@ -187,6 +215,7 @@ impl Store {
                         created_at: row.get(5)?,
                         summary: row.get(6)?,
                         status: row.get(7)?,
+                        audio_path: row.get(8)?,
                     })
                 },
             )
@@ -715,5 +744,54 @@ mod tests {
             .expect("collect rows");
         assert_eq!(rows.len(), 2);
         assert!(rows.iter().all(|s| s == "complete"));
+    }
+
+    #[test]
+    fn migration_adds_audio_path_column_with_null_default() {
+        let temp_file = NamedTempFile::new().expect("temp file");
+        let path = temp_file.path().to_path_buf();
+
+        {
+            let conn = rusqlite::Connection::open(&path).expect("open raw");
+            conn.execute(
+                "CREATE TABLE transcriptions (
+                    id INTEGER PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    text TEXT NOT NULL,
+                    language TEXT NOT NULL,
+                    duration_secs REAL NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    summary TEXT,
+                    status TEXT NOT NULL DEFAULT 'complete'
+                )",
+                [],
+            )
+            .expect("create pre-audio_path schema");
+            conn.execute(
+                "INSERT INTO transcriptions (title, text, language, duration_secs) VALUES ('old', 'a', 'pt', 1.0)",
+                [],
+            )
+            .expect("seed");
+        }
+
+        let store = Store::new(&path).expect("upgrade open");
+        let row: Option<String> = store
+            .conn
+            .query_row(
+                "SELECT audio_path FROM transcriptions LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .expect("query");
+        assert!(row.is_none());
+    }
+
+    #[test]
+    fn set_audio_path_persists_and_get_returns_it() {
+        let (store, _temp_file) = create_temp_store();
+        let id = store.insert_partial("t", "pt").expect("insert");
+        store.set_audio_path(id, "/tmp/dictation_42.wav").expect("set");
+        let row = store.get(id).expect("get");
+        assert_eq!(row.audio_path.as_deref(), Some("/tmp/dictation_42.wav"));
     }
 }
