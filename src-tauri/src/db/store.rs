@@ -160,6 +160,20 @@ impl Store {
         Ok(())
     }
 
+    pub fn update_title(&self, id: i64, title: &str) -> Result<(), String> {
+        let affected = self
+            .conn
+            .execute(
+                "UPDATE transcriptions SET title = ?1 WHERE id = ?2",
+                params![title, id],
+            )
+            .map_err(|e| format!("Failed to update title: {}", e))?;
+        if affected == 0 {
+            return Err(format!("Transcription with id {} not found", id));
+        }
+        Ok(())
+    }
+
     /// Removes partial rows that have no text and no duration — these can only
     /// come from a force-kill that happened before the first segment callback
     /// fired. Returns the number of rows deleted.
@@ -793,5 +807,14 @@ mod tests {
         store.set_audio_path(id, "/tmp/dictation_42.wav").expect("set");
         let row = store.get(id).expect("get");
         assert_eq!(row.audio_path.as_deref(), Some("/tmp/dictation_42.wav"));
+    }
+
+    #[test]
+    fn update_title_changes_title() {
+        let (store, _temp_file) = create_temp_store();
+        let id = store.insert_partial("Old Title", "pt").expect("insert");
+        store.update_title(id, "New Title").expect("update");
+        let row = store.get(id).expect("get");
+        assert_eq!(row.title, "New Title");
     }
 }

@@ -15,6 +15,8 @@
     let elapsed = $state(0);
     let percent = $state(0);
     let recordedDurationLabel = $state("");
+    /** @type {number | null} */
+    let partialId = $state(null);
     /** @type {ReturnType<typeof setInterval> | null} */
     let timer = null;
 
@@ -86,7 +88,7 @@
             error = "";
             liveText = "";
             percent = 0;
-            await invoke("start_dictation", { language: locale });
+            partialId = await invoke("start_dictation", { language: locale });
             phase = "recording";
             elapsed = 0;
             timer = setInterval(() => { elapsed += 1; }, 1000);
@@ -106,6 +108,7 @@
             phase = "finalizing";
             appBusy.set(true);
             await invoke("stop_dictation", {
+                partialId: partialId ?? 0,
                 title: `${t("dictation")} ${now}`,
                 language: locale,
                 durationSecs: elapsed,

@@ -311,6 +311,8 @@ pub fn run_transcription_loop(
     language: &str,
     source_rate: u32,
     channels: u16,
+    partial_id: i64,
+    store: std::sync::Arc<Mutex<crate::db::store::Store>>,
     app_handle: tauri::AppHandle,
 ) {
     let mut committed_segments: Vec<String> = Vec::new();
@@ -318,6 +320,9 @@ pub fn run_transcription_loop(
     let mut last_transcribed_len: usize = 0;
     let mut consecutive_silent_polls: u32 = 0;
     let mut pending_paragraph_break: bool = false;
+    let mut last_persist = std::time::Instant::now();
+    const PERSIST_INTERVAL_MS: u128 = 5000;
+    let started_at = std::time::Instant::now();
 
     let raw_samples_per_second = source_rate as usize * channels as usize;
     let min_raw_samples = raw_samples_per_second * MIN_SECONDS_TO_TRANSCRIBE;
@@ -434,6 +439,13 @@ pub fn run_transcription_loop(
             );
             if let Ok(mut last) = last_full_text_out.lock() {
                 *last = full_text.clone();
+            }
+            if last_persist.elapsed().as_millis() >= PERSIST_INTERVAL_MS {
+                last_persist = std::time::Instant::now();
+                if let Ok(s) = store.lock() {
+                    let elapsed_secs = started_at.elapsed().as_secs_f64();
+                    let _ = s.update_text(partial_id, &full_text, elapsed_secs);
+                }
             }
         }
 

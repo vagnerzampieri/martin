@@ -305,7 +305,7 @@ async fn start_dictation(
     state: State<'_, AppState>,
     app_handle: tauri::AppHandle,
     language: String,
-) -> Result<(), String> {
+) -> Result<i64, String> {
     {
         let guard = state.dictation.lock().map_err(|e| e.to_string())?;
         if guard.as_ref().is_some_and(|d| d.is_running()) {
@@ -346,6 +346,20 @@ async fn start_dictation(
     let transcriber = get_or_create_transcriber(cached, &model_path)?;
 
     let state_for_loop = session.state();
+    let store_for_loop = state.store.clone();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| format!("System clock error: {}", e))?
+        .as_secs();
+    let title = format!("Dictation {}", now);
+    let partial_id = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        let id = store.insert_partial(&title, &language)?;
+        if let Some(path) = session.audio_path() {
+            let _ = store.set_audio_path(id, &path.to_string_lossy());
+        }
+        id
+    };
     let app_for_loop = app_handle.clone();
     let language_owned = language.clone();
     let worker = std::thread::spawn(move || {
@@ -360,6 +374,8 @@ async fn start_dictation(
             &language_owned,
             source_rate,
             channels,
+            partial_id,
+            store_for_loop,
             app_for_loop.clone(),
         );
 
@@ -381,13 +397,14 @@ async fn start_dictation(
 
     *state.dictation.lock().map_err(|e| e.to_string())? = Some(session);
 
-    Ok(())
+    Ok(partial_id)
 }
 
 #[tauri::command]
 async fn stop_dictation(
     state: State<'_, AppState>,
     app_handle: tauri::AppHandle,
+    partial_id: i64,
     title: String,
     language: String,
     duration_secs: f64,
@@ -452,14 +469,14 @@ async fn stop_dictation(
         worker_seed.clone()
     };
 
-    let id = {
+    let id = partial_id;
+    {
         let store = state.store.lock().map_err(|e| e.to_string())?;
-        let new_id = store.insert_partial(&title, &language)?;
+        store.update_title(id, &title)?;
         if !partial_text.is_empty() {
-            store.update_text(new_id, &partial_text, duration_secs)?;
+            store.update_text(id, &partial_text, duration_secs)?;
         }
-        new_id
-    };
+    }
 
     // Fast path: if the live transcription loop already produced text
     // for this audio, skip the finalize whisper pass entirely. The live
