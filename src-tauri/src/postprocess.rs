@@ -172,16 +172,39 @@ pub fn replace_voice_commands(text: &str) -> String {
     result
 }
 
+/// Strip leading punctuation noise from each line. Whisper sometimes prefixes
+/// a transcription chunk with `.` or `,` when the audio begins with silence
+/// — visible as a `.` at the start of a new paragraph after a long pause.
+/// Punctuation chars `.,;:` plus whitespace are stripped at the start of
+/// each line. Sentence-ending `!?` are preserved because they're rarely
+/// added as silence artifacts and may be intentional.
+pub fn strip_leading_line_noise(text: &str) -> String {
+    text.lines()
+        .map(|line| {
+            line.trim_start_matches(|c: char| {
+                matches!(c, '.' | ',' | ';' | ':') || c.is_whitespace()
+            })
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Apply all normalization passes. Order matters:
 ///   1. Voice command substitutions (must run first so we capitalize correctly later)
 ///   2. Punctuation spacing fixes
 ///   3. Whitespace collapsing
-///   4. Capitalization
+///   4. Strip leading punctuation noise per line
+///   5. Capitalization
 pub fn normalize(text: &str) -> String {
     let s = replace_voice_commands(text);
     let s = fix_punctuation_spacing(&s);
     let s = collapse_whitespace(&s);
-    capitalize_sentences(&s)
+    let s = strip_leading_line_noise(&s);
+    let s = capitalize_sentences(&s);
+    // Trim trailing whitespace so the output is deterministic — otherwise
+    // `str::lines()` inside `collapse_whitespace` keeps losing one terminating
+    // newline per pass and idempotency breaks.
+    s.trim_end().to_string()
 }
 
 #[cfg(test)]
@@ -259,7 +282,9 @@ mod tests {
 
     #[test]
     fn normalize_is_idempotent() {
-        let input = "Olá mundo. Tudo bem?\n\nNovo paragrafo.";
+        // Use text that does NOT trigger any voice command (accent-insensitive
+        // matching now turns "novo paragrafo" into a paragraph break).
+        let input = "Olá mundo. Tudo bem?\n\nUma nova frase aqui.";
         assert_eq!(normalize(input), normalize(&normalize(input)));
     }
 
@@ -366,5 +391,47 @@ mod tests {
             replace_voice_commands("primeiro PONTO PARAGRAFO segundo"),
             "primeiro\n\nsegundo"
         );
+    }
+
+    #[test]
+    fn strip_leading_line_noise_removes_dot_at_start_of_paragraph() {
+        assert_eq!(
+            strip_leading_line_noise("primeiro.\n\n. segundo"),
+            "primeiro.\n\nsegundo"
+        );
+    }
+
+    #[test]
+    fn strip_leading_line_noise_handles_multiple_punctuation() {
+        assert_eq!(
+            strip_leading_line_noise(",, ; texto"),
+            "texto"
+        );
+    }
+
+    #[test]
+    fn strip_leading_line_noise_preserves_intentional_question_mark() {
+        // ?/! at line start are unusual but might be intentional.
+        assert_eq!(
+            strip_leading_line_noise("? texto"),
+            "? texto"
+        );
+    }
+
+    #[test]
+    fn normalize_drops_whisper_artifact_dot_after_paragraph() {
+        let input = "primeira frase novo parágrafo . segunda frase";
+        let expected = "Primeira frase\n\nSegunda frase";
+        assert_eq!(normalize(input), expected);
+    }
+
+    #[test]
+    fn normalize_drops_whisper_artifact_dot_in_assembled_paragraphs() {
+        // Simulates the real-world case: live loop assembles
+        // committed_text + "\n\n" + new_pass_text, where new_pass_text
+        // starts with ". " due to whisper picking up the silence boundary.
+        let input = "Primeira frase.\n\n. Segunda frase";
+        let expected = "Primeira frase.\n\nSegunda frase";
+        assert_eq!(normalize(input), expected);
     }
 }
