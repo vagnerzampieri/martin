@@ -71,15 +71,30 @@ pub fn capitalize_sentences(text: &str) -> String {
     out
 }
 
+/// Fold common Portuguese diacritics to their ASCII base so command matching
+/// is robust to whisper transcriptions that drop accents.
+fn fold_pt_char(c: char) -> char {
+    match c {
+        'á' | 'à' | 'ã' | 'â' | 'ä' => 'a',
+        'é' | 'è' | 'ê' | 'ë' => 'e',
+        'í' | 'ì' | 'î' | 'ï' => 'i',
+        'ó' | 'ò' | 'õ' | 'ô' | 'ö' => 'o',
+        'ú' | 'ù' | 'û' | 'ü' => 'u',
+        'ç' => 'c',
+        _ => c,
+    }
+}
+
 /// Replace spoken formatting commands with their punctuation/whitespace equivalents.
-/// Matches are case-insensitive and respect word boundaries — `avírgulab` is left alone.
-/// Order matters: longest phrases must be tried first so `ponto de interrogação`
-/// is not eaten by `ponto final`.
+/// Matches are case-insensitive, accent-insensitive, and respect word boundaries —
+/// `avírgulab` is left alone. Order matters: longest phrases must be tried first so
+/// `ponto de interrogação` is not eaten by `ponto final`.
 pub fn replace_voice_commands(text: &str) -> String {
     // Sorted longest-first to prevent shorter phrases from cannibalizing longer ones.
     const COMMANDS: &[(&str, &str)] = &[
         ("ponto de interrogação", "?"),
         ("ponto de exclamação", "!"),
+        ("ponto parágrafo", "\n\n"),
         ("novo parágrafo", "\n\n"),
         ("nova linha", "\n"),
         ("ponto final", "."),
@@ -89,7 +104,14 @@ pub fn replace_voice_commands(text: &str) -> String {
     ];
 
     let mut result = String::with_capacity(text.len());
-    let lower: Vec<char> = text.to_lowercase().chars().collect();
+    // Fold to lowercase AND strip Portuguese accents so commands like
+    // "novo parágrafo" still match when whisper drops the accent
+    // ("novo paragrafo").
+    let lower_folded: Vec<char> = text
+        .to_lowercase()
+        .chars()
+        .map(fold_pt_char)
+        .collect();
     let original: Vec<char> = text.chars().collect();
     let mut i = 0;
 
@@ -100,10 +122,10 @@ pub fn replace_voice_commands(text: &str) -> String {
             if i + phrase_chars.len() > original.len() {
                 continue;
             }
-            if !lower[i..i + phrase_chars.len()]
+            if !lower_folded[i..i + phrase_chars.len()]
                 .iter()
-                .zip(phrase_chars.iter())
-                .all(|(a, b)| a == b)
+                .zip(phrase_chars.iter().map(|c| fold_pt_char(*c)))
+                .all(|(a, b)| *a == b)
             {
                 continue;
             }
@@ -307,5 +329,42 @@ mod tests {
         let input = "olá vírgula tudo bem ponto de interrogação";
         let expected = "Olá, tudo bem?";
         assert_eq!(normalize(input), expected);
+    }
+
+    #[test]
+    fn voice_commands_ponto_paragrafo_alias() {
+        assert_eq!(
+            replace_voice_commands("primeiro ponto parágrafo segundo"),
+            "primeiro\n\nsegundo"
+        );
+    }
+
+    #[test]
+    fn voice_commands_match_without_accent() {
+        // Whisper occasionally drops accents in PT — commands must still match.
+        assert_eq!(
+            replace_voice_commands("primeiro novo paragrafo segundo"),
+            "primeiro\n\nsegundo"
+        );
+        assert_eq!(
+            replace_voice_commands("primeiro ponto paragrafo segundo"),
+            "primeiro\n\nsegundo"
+        );
+        assert_eq!(
+            replace_voice_commands("texto virgula mais"),
+            "texto, mais"
+        );
+        assert_eq!(
+            replace_voice_commands("isso ponto de interrogacao"),
+            "isso?"
+        );
+    }
+
+    #[test]
+    fn voice_commands_match_with_or_without_accent_case_insensitive() {
+        assert_eq!(
+            replace_voice_commands("primeiro PONTO PARAGRAFO segundo"),
+            "primeiro\n\nsegundo"
+        );
     }
 }
