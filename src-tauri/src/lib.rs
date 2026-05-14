@@ -4,6 +4,7 @@ mod dictation;
 mod model;
 mod summarize;
 mod transcribe;
+mod vad;
 
 use std::path::PathBuf;
 use std::sync::Mutex;
