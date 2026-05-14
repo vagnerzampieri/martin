@@ -168,7 +168,15 @@ pub fn run_finalize_dictation(
         // whisper's inference thread.
         let new_text = match acc_for_callback.lock() {
             Ok(mut acc) => {
-                if acc.is_empty() {
+                if acc.is_empty()
+                    || acc
+                        .chars()
+                        .last()
+                        .map(|c| c.is_whitespace())
+                        .unwrap_or(false)
+                {
+                    // Either fresh accumulator or prefix already supplied a
+                    // separator (e.g. trailing "\n\n" for a paragraph break).
                     acc.push_str(trimmed);
                 } else {
                     acc.push(' ');

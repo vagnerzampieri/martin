@@ -13,8 +13,10 @@ pub fn rms(samples: &[f32]) -> f32 {
 }
 
 /// Returns true when `rms_value` is at or below the silence threshold.
-/// Threshold tuned for typical laptop mics in a quiet room.
-pub const SILENCE_THRESHOLD: f32 = 0.01;
+/// Threshold tuned for typical laptop mics in a quiet room. Soft, thoughtful
+/// speech can sit around 0.01 RMS, so the threshold is set below that to avoid
+/// mis-classifying quiet speech as silence.
+pub const SILENCE_THRESHOLD: f32 = 0.005;
 
 pub fn is_silent(rms_value: f32) -> bool {
     rms_value <= SILENCE_THRESHOLD

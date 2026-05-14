@@ -1,6 +1,6 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, Stream};
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
@@ -27,9 +27,15 @@ pub fn state_label(state: u8) -> &'static str {
 
 const WHISPER_SAMPLE_RATE: u32 = 16000;
 const POLL_INTERVAL_MS: u64 = 500;
-const MIN_SECONDS_TO_TRANSCRIBE: usize = 3;
+const MIN_SECONDS_TO_TRANSCRIBE: usize = 2;
 const MAX_BUFFER_SECONDS: usize = 120;
-const PARAGRAPH_PAUSE_POLLS: u32 = 5; // ~2.5s of silence (5 × 500ms poll)
+/// Polls of silence before we treat the gap as a paragraph boundary.
+/// 10 × 500ms = ~5s — long enough that normal think-pauses don't trigger.
+const PARAGRAPH_PAUSE_POLLS: u32 = 10;
+/// Polls of silence before we flip the UI state to PAUSED. Higher than
+/// the natural pause between sentences so people aren't constantly told
+/// "paused" mid-thought.
+const PAUSED_STATE_POLLS: u32 = 4;
 
 pub struct DictationSession {
     stream: Option<Stream>,
@@ -45,6 +51,14 @@ pub struct DictationSession {
     last_peak_bits: Arc<AtomicU32>,
     /// Current session state (see `STATE_*` constants).
     state: Arc<AtomicU8>,
+    /// Length of `accumulated_raw` (raw interleaved samples) at the time of
+    /// the last successful whisper pass. Reset to 0 after a rollover clears
+    /// the buffer. Read by `stop_dictation` to compute the un-transcribed tail.
+    last_transcribed_raw_len: Arc<AtomicUsize>,
+    /// True when a paragraph rollover happened but the next emission has not
+    /// yet consumed the break. Read by `stop_dictation` so the finalize tail
+    /// uses a paragraph separator instead of a single space.
+    pending_paragraph_break_flag: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
     level_worker: Option<JoinHandle<()>>,
     wav_writer: Option<AudioWavWriter>,
@@ -68,6 +82,8 @@ impl DictationSession {
             final_audio: Arc::new(Mutex::new(Vec::new())),
             last_peak_bits: Arc::new(AtomicU32::new(0)),
             state: Arc::new(AtomicU8::new(STATE_LISTENING)),
+            last_transcribed_raw_len: Arc::new(AtomicUsize::new(0)),
+            pending_paragraph_break_flag: Arc::new(AtomicBool::new(false)),
             worker: None,
             level_worker: None,
             wav_writer: None,
@@ -214,6 +230,14 @@ impl DictationSession {
         self.state.clone()
     }
 
+    pub fn last_transcribed_raw_len(&self) -> Arc<AtomicUsize> {
+        self.last_transcribed_raw_len.clone()
+    }
+
+    pub fn pending_paragraph_break_flag(&self) -> Arc<AtomicBool> {
+        self.pending_paragraph_break_flag.clone()
+    }
+
     pub fn set_worker(&mut self, handle: JoinHandle<()>) {
         self.worker = Some(handle);
     }
@@ -307,6 +331,8 @@ pub fn run_transcription_loop(
     last_full_text_out: Arc<Mutex<String>>,
     final_audio_out: Arc<Mutex<Vec<f32>>>,
     state: Arc<AtomicU8>,
+    last_transcribed_raw_len_atom: Arc<AtomicUsize>,
+    pending_paragraph_break_atom: Arc<AtomicBool>,
     transcriber: &Transcriber,
     language: &str,
     source_rate: u32,
@@ -354,10 +380,10 @@ pub fn run_transcription_loop(
             consecutive_silent_polls = 0;
         }
 
-        // PAUSED after 2 consecutive silent polls (~1s). Switch back to
-        // LISTENING the moment speech resumes. PROCESSING is set during
+        // PAUSED after PAUSED_STATE_POLLS consecutive silent polls. Switch back
+        // to LISTENING the moment speech resumes. PROCESSING is set during
         // the whisper pass below.
-        if chunk_is_silent && consecutive_silent_polls >= 2 {
+        if chunk_is_silent && consecutive_silent_polls >= PAUSED_STATE_POLLS {
             state.store(STATE_PAUSED, Ordering::Release);
 
             // A pause this long is a paragraph boundary. Commit the current
@@ -374,10 +400,24 @@ pub fn run_transcription_loop(
                             sink.push(text);
                         }
                         pending_paragraph_break = true;
+                        pending_paragraph_break_atom.store(true, Ordering::Release);
+
+                        // Reflect the just-committed state in `last_full_text_out`
+                        // so a stop_dictation that happens before the next emission
+                        // (i.e. before new audio is transcribed) still has the
+                        // full text up to this paragraph. Trailing "\n\n" marks
+                        // that any tail audio is a new paragraph.
+                        let joined = committed_segments.join("\n\n");
+                        let normalized = crate::postprocess::normalize(&joined);
+                        let marker = format!("{}\n\n", normalized);
+                        if let Ok(mut last) = last_full_text_out.lock() {
+                            *last = marker;
+                        }
                     }
                 }
                 accumulated_raw.clear();
                 last_transcribed_len = 0;
+                last_transcribed_raw_len_atom.store(0, Ordering::Release);
             }
         } else if !chunk_is_silent && state.load(Ordering::Acquire) == STATE_PAUSED {
             state.store(STATE_LISTENING, Ordering::Release);
@@ -397,6 +437,7 @@ pub fn run_transcription_loop(
 
         let mono_16k = convert_to_mono_16k(&accumulated_raw, channels, source_rate);
         last_transcribed_len = accumulated_raw.len();
+        last_transcribed_raw_len_atom.store(last_transcribed_len, Ordering::Release);
 
         state.store(STATE_PROCESSING, Ordering::Release);
         let pass_text = match transcriber.transcribe_samples(&mono_16k, language) {
@@ -425,6 +466,7 @@ pub fn run_transcription_loop(
             };
             // Reset the flag — it has been consumed by this emission.
             pending_paragraph_break = false;
+            pending_paragraph_break_atom.store(false, Ordering::Release);
             let full_text = crate::postprocess::normalize(&raw_full);
             let stable_normalized = crate::postprocess::normalize(&stable_text);
             let provisional_normalized = crate::postprocess::normalize(&pass_text);
@@ -450,15 +492,25 @@ pub fn run_transcription_loop(
         }
 
         // If buffer exceeds max, commit the text we just produced and start fresh.
+        // Size-based rollover is mid-thought (not a paragraph boundary), so we
+        // keep `pending_paragraph_break` unchanged and update `last_full_text_out`
+        // with a single space separator at the boundary.
         if accumulated_raw.len() > max_raw_samples {
             if !pass_text.is_empty() {
                 committed_segments.push(pass_text.clone());
                 if let Ok(mut sink) = committed_out.lock() {
                     sink.push(pass_text);
                 }
+                let joined = committed_segments.join("\n\n");
+                let normalized = crate::postprocess::normalize(&joined);
+                let marker = format!("{} ", normalized);
+                if let Ok(mut last) = last_full_text_out.lock() {
+                    *last = marker;
+                }
             }
             accumulated_raw.clear();
             last_transcribed_len = 0;
+            last_transcribed_raw_len_atom.store(0, Ordering::Release);
         }
     }
 
