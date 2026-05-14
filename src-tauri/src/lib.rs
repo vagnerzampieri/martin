@@ -362,7 +362,16 @@ async fn start_dictation(
         }
     });
 
+    let level_running = session.running_flag();
+    let level_peak = session.last_peak_bits();
+    let level_state = session.state();
+    let level_app = app_handle.clone();
+    let level_worker = std::thread::spawn(move || {
+        dictation::run_level_emitter(level_running, level_peak, level_state, level_app);
+    });
+
     session.set_worker(worker);
+    session.set_level_worker(level_worker);
 
     *state.dictation.lock().map_err(|e| e.to_string())? = Some(session);
 

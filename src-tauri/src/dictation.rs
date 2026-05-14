@@ -393,3 +393,40 @@ pub fn run_transcription_loop(
         *sink = accumulated_raw;
     }
 }
+
+const LEVEL_EMIT_INTERVAL_MS: u64 = 100;
+
+/// Emits `dictation://level` (audio peak amplitude, 0.0–1.0) every
+/// LEVEL_EMIT_INTERVAL_MS and `dictation://state` whenever the shared
+/// state atomic changes. Runs on its own thread so UI updates stay
+/// responsive even while whisper is busy on the transcription thread.
+pub fn run_level_emitter(
+    running: Arc<AtomicBool>,
+    last_peak_bits: Arc<AtomicU32>,
+    state: Arc<AtomicU8>,
+    app_handle: tauri::AppHandle,
+) {
+    let mut last_emitted_state: u8 = u8::MAX;
+
+    while running.load(Ordering::Acquire) {
+        std::thread::sleep(std::time::Duration::from_millis(LEVEL_EMIT_INTERVAL_MS));
+
+        let peak = f32::from_bits(last_peak_bits.load(Ordering::Relaxed));
+        // Reset peak so the next interval reflects only fresh audio.
+        last_peak_bits.store(0u32, Ordering::Relaxed);
+
+        let _ = app_handle.emit(
+            "dictation://level",
+            serde_json::json!({ "peak": peak }),
+        );
+
+        let current = state.load(Ordering::Acquire);
+        if current != last_emitted_state {
+            last_emitted_state = current;
+            let _ = app_handle.emit(
+                "dictation://state",
+                serde_json::json!({ "state": state_label(current) }),
+            );
+        }
+    }
+}
