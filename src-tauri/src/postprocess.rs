@@ -71,12 +71,94 @@ pub fn capitalize_sentences(text: &str) -> String {
     out
 }
 
+/// Replace spoken formatting commands with their punctuation/whitespace equivalents.
+/// Matches are case-insensitive and respect word boundaries — `avírgulab` is left alone.
+/// Order matters: longest phrases must be tried first so `ponto de interrogação`
+/// is not eaten by `ponto final`.
+pub fn replace_voice_commands(text: &str) -> String {
+    // Sorted longest-first to prevent shorter phrases from cannibalizing longer ones.
+    const COMMANDS: &[(&str, &str)] = &[
+        ("ponto de interrogação", "?"),
+        ("ponto de exclamação", "!"),
+        ("novo parágrafo", "\n\n"),
+        ("nova linha", "\n"),
+        ("ponto final", "."),
+        ("abre aspas", "\""),
+        ("fecha aspas", "\""),
+        ("vírgula", ","),
+    ];
+
+    let mut result = String::with_capacity(text.len());
+    let lower: Vec<char> = text.to_lowercase().chars().collect();
+    let original: Vec<char> = text.chars().collect();
+    let mut i = 0;
+
+    while i < original.len() {
+        let mut matched = false;
+        for &(phrase, replacement) in COMMANDS {
+            let phrase_chars: Vec<char> = phrase.chars().collect();
+            if i + phrase_chars.len() > original.len() {
+                continue;
+            }
+            if !lower[i..i + phrase_chars.len()]
+                .iter()
+                .zip(phrase_chars.iter())
+                .all(|(a, b)| a == b)
+            {
+                continue;
+            }
+            // Word boundaries: char before must be non-alphabetic (or start),
+            // char after must be non-alphabetic (or end).
+            let before_ok = i == 0 || !original[i - 1].is_alphabetic();
+            let after_idx = i + phrase_chars.len();
+            let after_ok = after_idx == original.len() || !original[after_idx].is_alphabetic();
+            if !before_ok || !after_ok {
+                continue;
+            }
+
+            // Eat one leading space already in `result` if this replacement starts a new line
+            // or is a punctuation that should be glued to the previous word.
+            // Special case: "fecha aspas" (closing quote) should eat the leading space,
+            // but "abre aspas" (opening quote) should not.
+            let is_closing_quote = phrase == "fecha aspas";
+            if matches!(replacement, "\n" | "\n\n" | "." | "," | "?" | "!")
+                && result.ends_with(' ')
+            {
+                result.pop();
+            }
+            if is_closing_quote && result.ends_with(' ') {
+                result.pop();
+            }
+            result.push_str(replacement);
+            i = after_idx;
+            // Eat one trailing space after the command.
+            // For newlines, always eat; for any quote, always eat.
+            if i < original.len() && original[i] == ' ' {
+                if matches!(replacement, "\n" | "\n\n" | "\"") {
+                    i += 1;
+                }
+            }
+            matched = true;
+            break;
+        }
+
+        if !matched {
+            result.push(original[i]);
+            i += 1;
+        }
+    }
+
+    result
+}
+
 /// Apply all normalization passes. Order matters:
-///   1. Punctuation spacing fixes attached punctuation
-///   2. Whitespace collapsing removes extra spaces introduced by step 1
-///   3. Capitalization comes last so it sees clean sentence boundaries
+///   1. Voice command substitutions (must run first so we capitalize correctly later)
+///   2. Punctuation spacing fixes
+///   3. Whitespace collapsing
+///   4. Capitalization
 pub fn normalize(text: &str) -> String {
-    let s = fix_punctuation_spacing(text);
+    let s = replace_voice_commands(text);
+    let s = fix_punctuation_spacing(&s);
     let s = collapse_whitespace(&s);
     capitalize_sentences(&s)
 }
@@ -158,5 +240,73 @@ mod tests {
     fn normalize_is_idempotent() {
         let input = "Olá mundo. Tudo bem?\n\nNovo paragrafo.";
         assert_eq!(normalize(input), normalize(&normalize(input)));
+    }
+
+    #[test]
+    fn voice_commands_replace_paragraph_command() {
+        assert_eq!(
+            replace_voice_commands("primeiro novo parágrafo segundo"),
+            "primeiro\n\nsegundo"
+        );
+    }
+
+    #[test]
+    fn voice_commands_replace_newline_command() {
+        assert_eq!(
+            replace_voice_commands("linha um nova linha linha dois"),
+            "linha um\nlinha dois"
+        );
+    }
+
+    #[test]
+    fn voice_commands_replace_punctuation_commands() {
+        assert_eq!(
+            replace_voice_commands("texto vírgula mais texto ponto final"),
+            "texto, mais texto."
+        );
+        assert_eq!(
+            replace_voice_commands("isso ponto de interrogação"),
+            "isso?"
+        );
+        assert_eq!(
+            replace_voice_commands("uau ponto de exclamação"),
+            "uau!"
+        );
+    }
+
+    #[test]
+    fn voice_commands_replace_quote_commands() {
+        assert_eq!(
+            replace_voice_commands("ele disse abre aspas oi fecha aspas"),
+            "ele disse \"oi\""
+        );
+    }
+
+    #[test]
+    fn voice_commands_are_case_insensitive() {
+        assert_eq!(
+            replace_voice_commands("Novo Parágrafo segundo"),
+            "\n\nsegundo"
+        );
+        assert_eq!(
+            replace_voice_commands("texto VÍRGULA mais"),
+            "texto, mais"
+        );
+    }
+
+    #[test]
+    fn voice_commands_ignore_substring_inside_word() {
+        // "vírgula" inside a longer word should NOT match
+        assert_eq!(
+            replace_voice_commands("avírgulab"),
+            "avírgulab"
+        );
+    }
+
+    #[test]
+    fn normalize_applies_voice_commands_first() {
+        let input = "olá vírgula tudo bem ponto de interrogação";
+        let expected = "Olá, tudo bem?";
+        assert_eq!(normalize(input), expected);
     }
 }
