@@ -133,10 +133,9 @@ pub fn replace_voice_commands(text: &str) -> String {
             i = after_idx;
             // Eat one trailing space after the command.
             // For newlines, always eat; for any quote, always eat.
-            if i < original.len() && original[i] == ' ' {
-                if matches!(replacement, "\n" | "\n\n" | "\"") {
-                    i += 1;
-                }
+            if i < original.len() && original[i] == ' '
+                && matches!(replacement, "\n" | "\n\n" | "\"") {
+                i += 1;
             }
             matched = true;
             break;
