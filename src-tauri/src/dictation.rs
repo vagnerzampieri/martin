@@ -27,6 +27,7 @@ const WHISPER_SAMPLE_RATE: u32 = 16000;
 const POLL_INTERVAL_MS: u64 = 500;
 const MIN_SECONDS_TO_TRANSCRIBE: usize = 3;
 const MAX_BUFFER_SECONDS: usize = 120;
+const PARAGRAPH_PAUSE_POLLS: u32 = 5; // ~2.5s of silence (5 × 500ms poll)
 
 pub struct DictationSession {
     stream: Option<Stream>,
@@ -278,6 +279,7 @@ pub fn run_transcription_loop(
     let mut accumulated_raw: Vec<f32> = Vec::new();
     let mut last_transcribed_len: usize = 0;
     let mut consecutive_silent_polls: u32 = 0;
+    let mut pending_paragraph_break: bool = false;
 
     let raw_samples_per_second = source_rate as usize * channels as usize;
     let min_raw_samples = raw_samples_per_second * MIN_SECONDS_TO_TRANSCRIBE;
@@ -314,9 +316,27 @@ pub fn run_transcription_loop(
         // the whisper pass below.
         if chunk_is_silent && consecutive_silent_polls >= 2 {
             state.store(STATE_PAUSED, Ordering::Release);
-        } else if !chunk_is_silent
-            && state.load(Ordering::Acquire) == STATE_PAUSED
-        {
+
+            // A pause this long is a paragraph boundary. Commit the current
+            // pass text (if any) as a segment, clear the buffer, and queue a
+            // paragraph break for the NEXT non-empty emission so the break
+            // appears between paragraphs, not before an empty next chunk.
+            if consecutive_silent_polls == PARAGRAPH_PAUSE_POLLS && !accumulated_raw.is_empty() {
+                let mono_16k = convert_to_mono_16k(&accumulated_raw, channels, source_rate);
+                if let Ok(text) = transcriber.transcribe_samples(&mono_16k, language) {
+                    let text = text.trim().to_string();
+                    if !text.is_empty() {
+                        committed_segments.push(text.clone());
+                        if let Ok(mut sink) = committed_out.lock() {
+                            sink.push(text);
+                        }
+                        pending_paragraph_break = true;
+                    }
+                }
+                accumulated_raw.clear();
+                last_transcribed_len = 0;
+            }
+        } else if !chunk_is_silent && state.load(Ordering::Acquire) == STATE_PAUSED {
             state.store(STATE_LISTENING, Ordering::Release);
         }
 
@@ -353,12 +373,15 @@ pub fn run_transcription_loop(
         );
 
         if !pass_text.is_empty() {
-            let stable_text = committed_segments.join(" ");
+            let separator = if pending_paragraph_break { "\n\n" } else { " " };
+            let stable_text = committed_segments.join(separator);
             let raw_full = if stable_text.is_empty() {
                 pass_text.clone()
             } else {
-                format!("{} {}", stable_text, pass_text)
+                format!("{}{}{}", stable_text, separator, pass_text)
             };
+            // Reset the flag — it has been consumed by this emission.
+            pending_paragraph_break = false;
             let full_text = crate::postprocess::normalize(&raw_full);
             let stable_normalized = crate::postprocess::normalize(&stable_text);
             let provisional_normalized = crate::postprocess::normalize(&pass_text);
