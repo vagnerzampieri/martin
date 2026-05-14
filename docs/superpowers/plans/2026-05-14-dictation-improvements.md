@@ -53,8 +53,9 @@ opt-level = 3
 lto = "fat"
 codegen-units = 1
 strip = true
-panic = "abort"
 ```
+
+Note: do NOT add `panic = "abort"`. The transcription workers in `src-tauri/src/lib.rs` (around lines 192–220 and 505–531) and `src-tauri/src/transcribe/job.rs` rely on `std::panic::catch_unwind` to recover from whisper panics and emit a user-visible error. `panic = "abort"` would silently kill the whole process instead.
 
 - [ ] **Step 2: Verify release build still compiles**
 
