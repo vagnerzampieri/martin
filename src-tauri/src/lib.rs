@@ -339,6 +339,7 @@ async fn start_dictation(
 
     let transcriber = get_or_create_transcriber(cached, &model_path)?;
 
+    let state_for_loop = session.state();
     let app_for_loop = app_handle.clone();
     let language_owned = language.clone();
     let worker = std::thread::spawn(move || {
@@ -348,6 +349,7 @@ async fn start_dictation(
             committed_out,
             last_full_text_out,
             final_audio_out,
+            state_for_loop,
             &transcriber,
             &language_owned,
             source_rate,

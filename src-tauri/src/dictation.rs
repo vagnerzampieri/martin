@@ -254,13 +254,12 @@ pub fn convert_to_mono_16k(samples: &[f32], channels: u16, source_rate: u32) -> 
 
 /// Runs the transcription loop on a blocking thread.
 /// Re-transcribes the entire accumulated audio buffer each cycle for
-/// maximum Whisper accuracy. When the buffer exceeds MAX_BUFFER_SECONDS,
-/// commits the current text as a segment and starts a fresh buffer.
+/// maximum Whisper accuracy. Skips whisper passes during silence and
+/// updates the shared session state (listening/processing/paused).
+/// At rollover, commits the current text as a segment and starts a fresh buffer.
 ///
 /// On exit, hands off the post-rollover raw audio into `final_audio_out`
 /// so the finalize worker can re-transcribe it with progress callbacks.
-/// Without this hand-off the audio dies with the thread frame and
-/// `stop_dictation` finds an empty buffer.
 #[allow(clippy::too_many_arguments)]
 pub fn run_transcription_loop(
     buffer: Arc<Mutex<Vec<f32>>>,
@@ -268,6 +267,7 @@ pub fn run_transcription_loop(
     committed_out: Arc<Mutex<Vec<String>>>,
     last_full_text_out: Arc<Mutex<String>>,
     final_audio_out: Arc<Mutex<Vec<f32>>>,
+    state: Arc<AtomicU8>,
     transcriber: &Transcriber,
     language: &str,
     source_rate: u32,
@@ -277,6 +277,7 @@ pub fn run_transcription_loop(
     let mut committed_segments: Vec<String> = Vec::new();
     let mut accumulated_raw: Vec<f32> = Vec::new();
     let mut last_transcribed_len: usize = 0;
+    let mut consecutive_silent_polls: u32 = 0;
 
     let raw_samples_per_second = source_rate as usize * channels as usize;
     let min_raw_samples = raw_samples_per_second * MIN_SECONDS_TO_TRANSCRIBE;
@@ -286,20 +287,55 @@ pub fn run_transcription_loop(
         std::thread::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS));
 
         // Drain new samples from the shared buffer
+        let new_chunk_start = accumulated_raw.len();
         if let Ok(mut buf) = buffer.lock() {
             accumulated_raw.extend(buf.drain(..));
         }
+        let new_chunk_end = accumulated_raw.len();
 
-        // Only transcribe if we have enough new audio since last transcription
+        // Compute RMS over the NEW chunk only. We need the new-chunk view to
+        // decide whether speech is happening right now, independent of how much
+        // total audio we have accumulated.
+        let new_chunk_rms = if new_chunk_end > new_chunk_start {
+            crate::vad::rms(&accumulated_raw[new_chunk_start..new_chunk_end])
+        } else {
+            0.0
+        };
+
+        let chunk_is_silent = crate::vad::is_silent(new_chunk_rms);
+        if chunk_is_silent {
+            consecutive_silent_polls = consecutive_silent_polls.saturating_add(1);
+        } else {
+            consecutive_silent_polls = 0;
+        }
+
+        // PAUSED after 2 consecutive silent polls (~1s). Switch back to
+        // LISTENING the moment speech resumes. PROCESSING is set during
+        // the whisper pass below.
+        if chunk_is_silent && consecutive_silent_polls >= 2 {
+            state.store(STATE_PAUSED, Ordering::Release);
+        } else if !chunk_is_silent
+            && state.load(Ordering::Acquire) == STATE_PAUSED
+        {
+            state.store(STATE_LISTENING, Ordering::Release);
+        }
+
+        // Only transcribe if we have enough audio AND there is new audio since last run
         if accumulated_raw.len() < min_raw_samples || accumulated_raw.len() == last_transcribed_len
         {
             continue;
         }
 
-        // Convert accumulated audio to mono 16kHz and transcribe the whole thing
+        // Silence gate: if the freshly added chunk is silent AND we already
+        // produced text recently, don't waste CPU re-transcribing.
+        if chunk_is_silent && last_transcribed_len > 0 {
+            continue;
+        }
+
         let mono_16k = convert_to_mono_16k(&accumulated_raw, channels, source_rate);
         last_transcribed_len = accumulated_raw.len();
 
+        state.store(STATE_PROCESSING, Ordering::Release);
         let pass_text = match transcriber.transcribe_samples(&mono_16k, language) {
             Ok(text) => text.trim().to_string(),
             Err(e) => {
@@ -307,6 +343,14 @@ pub fn run_transcription_loop(
                 String::new()
             }
         };
+        // Back to LISTENING unless the silence detector has already flipped us
+        // to PAUSED in a subsequent (unlikely, this is the same thread) tick.
+        let _ = state.compare_exchange(
+            STATE_PROCESSING,
+            STATE_LISTENING,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
 
         if !pass_text.is_empty() {
             let full_text = if committed_segments.is_empty() {
@@ -317,7 +361,8 @@ pub fn run_transcription_loop(
             let _ = app_handle.emit(
                 "dictation://segment",
                 serde_json::json!({
-                    "text": pass_text,
+                    "stableText": committed_segments.join(" "),
+                    "provisionalText": pass_text,
                     "fullText": full_text,
                 }),
             );
@@ -327,7 +372,6 @@ pub fn run_transcription_loop(
         }
 
         // If buffer exceeds max, commit the text we just produced and start fresh.
-        // Reusing `pass_text` avoids a second whisper pass on the same audio.
         if accumulated_raw.len() > max_raw_samples {
             if !pass_text.is_empty() {
                 committed_segments.push(pass_text.clone());
@@ -340,10 +384,7 @@ pub fn run_transcription_loop(
         }
     }
 
-    // Final drain of any audio captured between the last poll and the
-    // stop signal. This audio + everything since the last rollover is
-    // handed off to `final_audio_out` so the finalize worker can
-    // re-transcribe it with progress callbacks.
+    // Final drain of any audio captured between the last poll and the stop signal.
     if let Ok(mut buf) = buffer.lock() {
         accumulated_raw.extend(buf.drain(..));
     }
