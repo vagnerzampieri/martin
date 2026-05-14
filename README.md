@@ -141,7 +141,7 @@ Download with: `./scripts/download-model.sh <model>`
 
 ```bash
 cargo tauri dev          # Full app dev mode with hot reload
-cargo test               # Run Rust tests (37 tests)
+cargo test               # Run Rust tests
 npm run check            # Svelte/TypeScript type checking
 cargo fmt                # Format Rust code
 cargo clippy             # Lint Rust code
