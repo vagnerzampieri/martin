@@ -13,8 +13,6 @@ use symphonia::core::probe::Hint;
 
 use crate::transcribe::whisper::wav_duration_secs;
 
-// TODO(task-5): drop this allow once the Tauri import command consumes this API.
-#[allow(dead_code)]
 pub struct Imported {
     pub wav_path: PathBuf,
     pub duration_secs: f64,
@@ -35,8 +33,6 @@ impl Drop for PartialFileGuard<'_> {
     }
 }
 
-// TODO(task-5): drop this allow once the Tauri import command consumes this API.
-#[allow(dead_code)]
 pub fn import_audio(source: &Path, dest_dir: &Path) -> Result<Imported, String> {
     let file = File::open(source).map_err(|e| format!("Failed to open file: {}", e))?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
