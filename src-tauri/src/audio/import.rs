@@ -1,3 +1,4 @@
+#[allow(dead_code)]
 fn downmix_to_mono(interleaved: &[f32], channels: usize) -> Vec<f32> {
     if channels <= 1 {
         return interleaved.to_vec();
@@ -29,9 +30,10 @@ mod tests {
 
     #[test]
     fn downmix_quad_averages_four_channels() {
-        let out = downmix_to_mono(&[1.0, 1.0, 1.0, 1.0], 4);
+        // (1+3+5+7)/4 = 4.0
+        let out = downmix_to_mono(&[1.0, 3.0, 5.0, 7.0], 4);
         assert_eq!(out.len(), 1);
-        assert_close(out[0], 1.0);
+        assert_close(out[0], 4.0);
     }
 
     #[test]
