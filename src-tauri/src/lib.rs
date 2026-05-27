@@ -78,6 +78,49 @@ async fn stop_recording(state: State<'_, AppState>) -> Result<PendingRecording, 
     store.get_pending(id)
 }
 
+const SUPPORTED_IMPORT_EXTENSIONS: [&str; 5] = ["mp3", "m4a", "wav", "ogg", "flac"];
+
+#[tauri::command]
+async fn import_audio_file(
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<PendingRecording, String> {
+    eprintln!("[martin] import_audio_file: path={}", path);
+    let source = PathBuf::from(&path);
+
+    if !source.exists() {
+        eprintln!("[martin] import_audio_file: file not found: {}", path);
+        return Err("File not found".to_string());
+    }
+
+    let ext = source
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_lowercase())
+        .unwrap_or_default();
+    if !SUPPORTED_IMPORT_EXTENSIONS.contains(&ext.as_str()) {
+        eprintln!("[martin] import_audio_file: unsupported extension '.{}'", ext);
+        return Err(format!("Unsupported file type: .{}", ext));
+    }
+
+    let dest_dir = state.data_dir.clone();
+    let imported = tauri::async_runtime::spawn_blocking(move || {
+        audio::import::import_audio(&source, &dest_dir)
+    })
+    .await
+    .map_err(|e| format!("Import task failed: {}", e))?
+    .inspect_err(|e| eprintln!("[martin] import_audio_file: decode failed: {}", e))?;
+
+    let file_path = imported.wav_path.to_string_lossy().to_string();
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    let id = store.save_pending(&file_path, imported.duration_secs)?;
+    eprintln!(
+        "[martin] import_audio_file: saved pending id={} duration={:.1}s file={}",
+        id, imported.duration_secs, file_path
+    );
+    store.get_pending(id)
+}
+
 fn get_or_create_transcriber(
     cached: Option<Transcriber>,
     model_path: &std::path::Path,
@@ -638,6 +681,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let data_dir = app
                 .path()
@@ -670,6 +714,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             start_recording,
             stop_recording,
+            import_audio_file,
             transcribe_pending_recording,
             cancel_job,
             list_transcriptions,

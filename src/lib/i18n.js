@@ -49,6 +49,10 @@ const translations = {
     stateProcessing: "Processando",
     statePaused: "Pausa detectada",
     provisionalHint: "Texto cinza ainda pode ser revisado; texto preto já está confirmado.",
+    importAudio: "Importar áudio",
+    importing: "Importando…",
+    importError: "Falha ao importar áudio",
+    audioFiles: "Arquivos de áudio",
   },
   en: {
     record: "Record",
@@ -100,6 +104,10 @@ const translations = {
     stateProcessing: "Processing",
     statePaused: "Paused",
     provisionalHint: "Gray text may still be refined; black text is confirmed.",
+    importAudio: "Import audio",
+    importing: "Importing…",
+    importError: "Failed to import audio",
+    audioFiles: "Audio files",
   },
 };
 

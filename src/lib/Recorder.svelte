@@ -1,6 +1,7 @@
 <script>
     import { invoke } from "@tauri-apps/api/core";
     import { listen } from "@tauri-apps/api/event";
+    import { open } from "@tauri-apps/plugin-dialog";
     import { onMount, onDestroy } from "svelte";
     import { t, locale } from "./i18n.js";
     import { formatDate, formatDuration } from "./format.js";
@@ -11,6 +12,7 @@
 
     let recording = $state(false);
     let processing = $state(false);
+    let importing = $state(false);
     let error = $state("");
     let elapsed = $state(0);
     let timer = null;
@@ -125,6 +127,38 @@
         }
     }
 
+    async function importAudio() {
+        try {
+            error = "";
+            console.log("[import] opening file dialog");
+            const selected = await open({
+                multiple: false,
+                filters: [
+                    {
+                        name: t("audioFiles"),
+                        extensions: ["mp3", "m4a", "wav", "ogg", "flac"],
+                    },
+                ],
+            });
+            if (typeof selected !== "string") {
+                console.log("[import] dialog dismissed (no file selected):", selected);
+                return; // user cancelled
+            }
+            console.log("[import] selected:", selected);
+            importing = true;
+            const pending = await invoke("import_audio_file", {
+                path: selected,
+            });
+            console.log("[import] pending created:", pending);
+            pendingRecordings = [pending, ...pendingRecordings];
+        } catch (e) {
+            console.error("[import] failed:", e);
+            error = `${t("importError")}: ${e}`;
+        } finally {
+            importing = false;
+        }
+    }
+
     async function transcribePending(id) {
         try {
             error = "";
@@ -194,9 +228,16 @@
             {t("processingAudio")}
         </div>
     {:else if phase === "idle"}
-        <button class="btn-start" onclick={startRecording}>
-            {t("startRecording")}
-        </button>
+        {#if importing}
+            <div class="status processing">{t("importing")}</div>
+        {:else}
+            <button class="btn-start" onclick={startRecording}>
+                {t("startRecording")}
+            </button>
+            <button class="btn-import" onclick={importAudio}>
+                {t("importAudio")}
+            </button>
+        {/if}
     {/if}
 
     {#if error}
@@ -283,6 +324,14 @@
         color: white;
         font-size: 1.3rem;
         padding: 16px 48px;
+    }
+
+    .btn-import {
+        background: transparent;
+        color: var(--text-muted);
+        border: 1px solid var(--text-muted);
+        font-size: 1rem;
+        padding: 10px 24px;
     }
 
     .processing {
