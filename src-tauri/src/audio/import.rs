@@ -34,6 +34,7 @@ impl Drop for PartialFileGuard<'_> {
 }
 
 pub fn import_audio(source: &Path, dest_dir: &Path) -> Result<Imported, String> {
+    eprintln!("[martin] import_audio: decoding {}", source.display());
     let file = File::open(source).map_err(|e| format!("Failed to open file: {}", e))?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
 
@@ -75,6 +76,7 @@ pub fn import_audio(source: &Path, dest_dir: &Path) -> Result<Imported, String> 
 
     let mut writer: Option<WavWriter<BufWriter<File>>> = None;
     let mut samples_written: u64 = 0;
+    let mut header_rate: u32 = 0;
 
     loop {
         let packet = match format.next_packet() {
@@ -113,6 +115,7 @@ pub fn import_audio(source: &Path, dest_dir: &Path) -> Result<Imported, String> 
                 WavWriter::create(&wav_path, wav_spec)
                     .map_err(|e| format!("Failed to create WAV: {}", e))?,
             );
+            header_rate = spec.rate;
         }
 
         // One SampleBuffer per packet keeps memory bounded to a single packet.
@@ -138,6 +141,13 @@ pub fn import_audio(source: &Path, dest_dir: &Path) -> Result<Imported, String> 
     }
 
     let duration_secs = wav_duration_secs(&wav_path)?;
+    eprintln!(
+        "[martin] import_audio: wrote {} mono samples (~{:.1}s) at {}Hz -> {}",
+        samples_written,
+        duration_secs,
+        header_rate,
+        wav_path.display()
+    );
     cleanup.committed = true;
     drop(cleanup);
     Ok(Imported {

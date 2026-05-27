@@ -85,9 +85,11 @@ async fn import_audio_file(
     state: State<'_, AppState>,
     path: String,
 ) -> Result<PendingRecording, String> {
+    eprintln!("[martin] import_audio_file: path={}", path);
     let source = PathBuf::from(&path);
 
     if !source.exists() {
+        eprintln!("[martin] import_audio_file: file not found: {}", path);
         return Err("File not found".to_string());
     }
 
@@ -97,6 +99,7 @@ async fn import_audio_file(
         .map(|e| e.to_lowercase())
         .unwrap_or_default();
     if !SUPPORTED_IMPORT_EXTENSIONS.contains(&ext.as_str()) {
+        eprintln!("[martin] import_audio_file: unsupported extension '.{}'", ext);
         return Err(format!("Unsupported file type: .{}", ext));
     }
 
@@ -105,11 +108,16 @@ async fn import_audio_file(
         audio::import::import_audio(&source, &dest_dir)
     })
     .await
-    .map_err(|e| format!("Import task failed: {}", e))??;
+    .map_err(|e| format!("Import task failed: {}", e))?
+    .inspect_err(|e| eprintln!("[martin] import_audio_file: decode failed: {}", e))?;
 
     let file_path = imported.wav_path.to_string_lossy().to_string();
     let store = state.store.lock().map_err(|e| e.to_string())?;
     let id = store.save_pending(&file_path, imported.duration_secs)?;
+    eprintln!(
+        "[martin] import_audio_file: saved pending id={} duration={:.1}s file={}",
+        id, imported.duration_secs, file_path
+    );
     store.get_pending(id)
 }
 

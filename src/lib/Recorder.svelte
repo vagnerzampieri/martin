@@ -130,6 +130,7 @@
     async function importAudio() {
         try {
             error = "";
+            console.log("[import] opening file dialog");
             const selected = await open({
                 multiple: false,
                 filters: [
@@ -139,13 +140,19 @@
                     },
                 ],
             });
-            if (typeof selected !== "string") return; // user cancelled
+            if (typeof selected !== "string") {
+                console.log("[import] dialog dismissed (no file selected):", selected);
+                return; // user cancelled
+            }
+            console.log("[import] selected:", selected);
             importing = true;
             const pending = await invoke("import_audio_file", {
                 path: selected,
             });
+            console.log("[import] pending created:", pending);
             pendingRecordings = [pending, ...pendingRecordings];
         } catch (e) {
+            console.error("[import] failed:", e);
             error = `${t("importError")}: ${e}`;
         } finally {
             importing = false;
