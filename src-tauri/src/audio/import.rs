@@ -20,6 +20,21 @@ pub struct Imported {
     pub duration_secs: f64,
 }
 
+/// Removes the partial WAV file on drop unless explicitly committed.
+/// Ensures a failed import never leaves an orphaned file in dest_dir.
+struct PartialFileGuard<'a> {
+    path: &'a Path,
+    committed: bool,
+}
+
+impl Drop for PartialFileGuard<'_> {
+    fn drop(&mut self) {
+        if !self.committed {
+            let _ = std::fs::remove_file(self.path);
+        }
+    }
+}
+
 // TODO(task-5): drop this allow once the Tauri import command consumes this API.
 #[allow(dead_code)]
 pub fn import_audio(source: &Path, dest_dir: &Path) -> Result<Imported, String> {
@@ -57,6 +72,11 @@ pub fn import_audio(source: &Path, dest_dir: &Path) -> Result<Imported, String> 
         .as_millis();
     let wav_path = dest_dir.join(format!("imported_{}.wav", timestamp));
 
+    let mut cleanup = PartialFileGuard {
+        path: &wav_path,
+        committed: false,
+    };
+
     let mut writer: Option<WavWriter<BufWriter<File>>> = None;
     let mut samples_written: u64 = 0;
 
@@ -84,6 +104,9 @@ pub fn import_audio(source: &Path, dest_dir: &Path) -> Result<Imported, String> 
         let channels = spec.channels.count();
 
         if writer.is_none() {
+            // Sample rate is taken from the first decoded packet. The target
+            // formats (mp3/m4a/wav/ogg/flac) have a single constant rate per
+            // stream, so this header value holds for the whole file.
             let wav_spec = WavSpec {
                 channels: 1,
                 sample_rate: spec.rate,
@@ -115,11 +138,12 @@ pub fn import_audio(source: &Path, dest_dir: &Path) -> Result<Imported, String> 
         .map_err(|e| format!("Failed to finalize WAV: {}", e))?;
 
     if samples_written == 0 {
-        let _ = std::fs::remove_file(&wav_path);
         return Err("Audio file contained no samples".to_string());
     }
 
     let duration_secs = wav_duration_secs(&wav_path)?;
+    cleanup.committed = true;
+    drop(cleanup);
     Ok(Imported {
         wav_path,
         duration_secs,
@@ -216,12 +240,43 @@ mod tests {
         assert_eq!(reader.spec().channels, 1, "output must be mono");
         assert_eq!(reader.spec().sample_rate, 16000);
         assert_eq!(reader.duration(), 16000, "one mono frame per source frame");
+
+        let mut out_reader = hound::WavReader::open(&imported.wav_path).unwrap();
+        let first = out_reader.samples::<i16>().next().unwrap().unwrap();
+        assert!((first - 2000).abs() <= 2, "expected ~2000, got {first}");
     }
 
     #[test]
     fn import_missing_file_returns_error() {
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("does_not_exist.wav");
+        assert!(import_audio(&src, dir.path()).is_err());
+    }
+
+    #[test]
+    fn import_empty_wav_errors_and_leaves_no_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("empty.wav");
+        write_stereo_wav(&src, 16000, 0); // valid header, zero frames
+
+        let result = import_audio(&src, dir.path());
+        assert!(result.is_err());
+
+        // No orphaned imported_*.wav should remain in dest_dir.
+        let leftover: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with("imported_"))
+            .collect();
+        assert!(leftover.is_empty(), "partial WAV was left behind");
+    }
+
+    #[test]
+    fn import_garbage_file_errors_without_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("garbage.wav");
+        std::fs::write(&src, [0u8, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]).unwrap();
+
         assert!(import_audio(&src, dir.path()).is_err());
     }
 }
