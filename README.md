@@ -22,6 +22,7 @@ Two modes: **Record** meetings with dual audio capture (mic + system), or **Dict
 
 ### Recording mode
 - **Dual audio capture** — records microphone + system audio (browser, Zoom, Meet) via PipeWire
+- **Import audio files** — bring in existing audio (mp3, m4a, wav, ogg, flac) decoded locally with Symphonia; the file lands in the pending list and transcribes through the same flow
 - **Pending recordings** — recordings are tracked in the database, survive app restarts, and can be transcribed or deleted from a list
 - **Non-blocking stop** — stopping long recordings runs mixing in the background, UI stays responsive
 
@@ -97,6 +98,15 @@ The binary will be in `src-tauri/target/release/martin`.
 6. Done. Text is saved, audio is deleted.
 
 You can record multiple times before transcribing — each recording is tracked separately. Close and reopen the app; your pending recordings are still there.
+
+### Importing an audio file
+
+1. On the **Record** tab, click **Import audio** / **Importar áudio**
+2. Pick an audio file (mp3, m4a, wav, ogg, flac) — the file dialog is filtered to supported formats
+3. The file is decoded locally and appears in the pending list, just like a recording
+4. Click **Transcribe** / **Transcrever** to transcribe it
+
+Your original file is never modified — martin decodes a private copy and removes it after a successful transcription.
 
 ### Dictating text
 
@@ -183,6 +193,7 @@ src-tauri/src/
 ├── lib.rs              # Tauri commands, app state
 ├── audio/
 │   ├── capture.rs      # Mic (cpal) + system audio (pw-record)
+│   ├── import.rs       # Decode external audio files (Symphonia) → mono WAV
 │   ├── mix.rs          # WAV mixing (mic + system → single file)
 │   └── wav_writer.rs   # Thread-safe WAV writer (used by recorder and dictation)
 ├── db/
