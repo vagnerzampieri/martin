@@ -24,6 +24,7 @@
     let dictationState = $state("listening");
     let partialId = $state(null);
     /** @type {ReturnType<typeof setInterval> | null} */
+    /** @type {number | null} */
     let timer = null;
 
     /** @type {Array<() => void>} */
@@ -125,13 +126,13 @@
             elapsed = 0;
             timer = setInterval(() => { elapsed += 1; }, 1000);
         } catch (e) {
-            error = e;
+            error = String(e);
         }
     }
 
     async function stopDictation() {
         try {
-            clearInterval(timer);
+            if (timer) clearInterval(timer);
             timer = null;
             const now = new Date().toLocaleString(
                 locale === "pt" ? "pt-BR" : "en-US",
@@ -146,7 +147,7 @@
                 durationSecs: elapsed,
             });
         } catch (e) {
-            error = e;
+            error = String(e);
             phase = "idle";
             appBusy.set(false);
             recordedDurationLabel = "";
@@ -158,10 +159,11 @@
             phase = "cancelling";
             await invoke("cancel_job");
         } catch (e) {
-            error = e;
+            error = String(e);
         }
     }
 
+    /** @param {number} secs */
     function formatTime(secs) {
         const m = Math.floor(secs / 60).toString().padStart(2, "0");
         const s = (secs % 60).toString().padStart(2, "0");
