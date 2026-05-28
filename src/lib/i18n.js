@@ -53,6 +53,11 @@ const translations = {
     importing: "Importando…",
     importError: "Falha ao importar áudio",
     audioFiles: "Arquivos de áudio",
+    transcribeBusy: "Aguarde a transcrição atual",
+    dictationBusy: "Aguarde a transcrição atual",
+    finalizeBannerLabel: "Transcrevendo em segundo plano",
+    showDetails: "Detalhes",
+    hideDetails: "Esconder",
   },
   en: {
     record: "Record",
@@ -108,6 +113,11 @@ const translations = {
     importing: "Importing…",
     importError: "Failed to import audio",
     audioFiles: "Audio files",
+    transcribeBusy: "Wait for the current transcription",
+    dictationBusy: "Wait for the current transcription",
+    finalizeBannerLabel: "Transcribing in background",
+    showDetails: "Details",
+    hideDetails: "Hide",
   },
 };
 
