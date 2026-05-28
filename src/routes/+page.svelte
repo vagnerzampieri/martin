@@ -9,19 +9,35 @@
     import { onMount } from "svelte";
     import ModelDownload from "../lib/ModelDownload.svelte";
     import { appBusy } from "../lib/appBusy.js";
+    import FinalizeBanner from "../lib/FinalizeBanner.svelte";
+    import { initFinalizeListeners } from "../lib/finalizeProgress.js";
 
     let currentView = $state("recorder");
     let selectedTranscription = $state(null);
     let modelReady = $state(true);
     let checkingModel = $state(true);
 
-    onMount(async () => {
-        try {
-            modelReady = await invoke("check_model_exists");
-        } catch {
-            modelReady = false;
-        }
-        checkingModel = false;
+    onMount(() => {
+        (async () => {
+            try {
+                modelReady = await invoke("check_model_exists");
+            } catch {
+                modelReady = false;
+            }
+            checkingModel = false;
+
+            await initFinalizeListeners();
+        })().catch(console.error);
+
+        /** @param {Event} e */
+        const onComplete = (e) => {
+            const detail = /** @type {CustomEvent} */ (e).detail;
+            if (detail) showTranscription(detail);
+        };
+        window.addEventListener("finalize:complete", onComplete);
+        return () => {
+            window.removeEventListener("finalize:complete", onComplete);
+        };
     });
 
     function onModelDownloaded() {
@@ -54,6 +70,7 @@
 </script>
 
 <main>
+    <FinalizeBanner />
     {#if !checkingModel && !modelReady}
         <ModelDownload onComplete={onModelDownloaded} onError={onModelError} />
     {/if}
