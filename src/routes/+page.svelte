@@ -14,6 +14,7 @@
     import { recordingState } from "../lib/recordingState.js";
 
     let currentView = $state("recorder");
+    /** @type {object | null} */
     let selectedTranscription = $state(null);
     let modelReady = $state(true);
     let checkingModel = $state(true);
@@ -54,6 +55,7 @@
         // error is displayed inside ModelDownload; nothing to do here
     }
 
+    /** @param {object} transcription */
     function showTranscription(transcription) {
         selectedTranscription = transcription;
         currentView = "view";

@@ -11,6 +11,7 @@
     let importing = $state(false);
     let error = $state("");
 
+    /** @type {Array<{id: number, created_at: string, duration_secs: number}>} */
     let pendingRecordings = $state([]);
 
     function handleFinalizeComplete() {
@@ -51,7 +52,7 @@
             await invoke("start_recording");
             beginRecord();
         } catch (e) {
-            error = e;
+            error = String(e);
         }
     }
 
@@ -62,7 +63,7 @@
             const pending = await invoke("stop_recording");
             pendingRecordings = [pending, ...pendingRecordings];
         } catch (e) {
-            error = e;
+            error = String(e);
         } finally {
             processing = false;
         }
@@ -123,7 +124,7 @@
             // Fill in the row id now that the backend returned it.
             finalizeProgress.update((s) => ({ ...s, id: newId }));
         } catch (e) {
-            error = e;
+            error = String(e);
             // Roll back the optimistic store flip.
             finalizeProgress.set({
                 id: null,
@@ -136,15 +137,17 @@
         }
     }
 
+    /** @param {number} id */
     async function deletePending(id) {
         try {
             await invoke("delete_pending_recording", { id });
             pendingRecordings = pendingRecordings.filter((p) => p.id !== id);
         } catch (e) {
-            error = e;
+            error = String(e);
         }
     }
 
+    /** @param {number} secs */
     function formatTime(secs) {
         const m = Math.floor(secs / 60).toString().padStart(2, "0");
         const s = (secs % 60).toString().padStart(2, "0");

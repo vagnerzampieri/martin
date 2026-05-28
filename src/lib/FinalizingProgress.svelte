@@ -12,6 +12,7 @@
     let confirming = $state(false);
     let liveTextEl = $state();
     let dialogEl = $state();
+    /** @type {HTMLElement | null} */
     let lastFocused = null;
 
     const SIZE = 96;
@@ -37,7 +38,7 @@
 
     async function requestCancel() {
         if (cancelling) return;
-        lastFocused = document.activeElement;
+        lastFocused = /** @type {HTMLElement | null} */ (document.activeElement);
         confirming = true;
         await tick();
         dialogEl?.querySelector(".btn-secondary")?.focus();
@@ -54,6 +55,7 @@
         onCancel?.();
     }
 
+    /** @param {KeyboardEvent} e */
     function handleDialogKey(e) {
         if (!confirming) return;
         if (e.key === "Escape") {
