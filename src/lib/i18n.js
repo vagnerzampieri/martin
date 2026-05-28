@@ -1,3 +1,4 @@
+/** @type {Record<string, Record<string, string>>} */
 const translations = {
   pt: {
     record: "Gravar",
@@ -124,6 +125,7 @@ const translations = {
 const lang = (navigator.language || "pt").slice(0, 2);
 const locale = translations[lang] ? lang : "pt";
 
+/** @param {string} key */
 export function t(key) {
   return translations[locale][key] || translations.pt[key] || key;
 }
