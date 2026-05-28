@@ -4,6 +4,7 @@
     import { onMount, onDestroy } from "svelte";
     import { t, locale } from "./i18n.js";
     import { appBusy } from "./appBusy.js";
+    import { finalizeProgress } from "./finalizeProgress.js";
     import FinalizingProgress from "./FinalizingProgress.svelte";
     import VuMeter from "./VuMeter.svelte";
 
@@ -193,7 +194,13 @@
             onCancel={requestCancel}
         />
     {:else}
-        <button class="btn-start" onclick={startDictation}>
+        <button
+            class="btn-start"
+            onclick={startDictation}
+            disabled={$finalizeProgress.phase !== "idle"}
+            aria-disabled={$finalizeProgress.phase !== "idle"}
+            title={$finalizeProgress.phase !== "idle" ? t("dictationBusy") : ""}
+        >
             {t("startDictation")}
         </button>
     {/if}
