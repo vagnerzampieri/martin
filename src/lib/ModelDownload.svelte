@@ -11,8 +11,11 @@
     let totalMb = $state(0);
     let error = $state("");
     let downloading = $state(false);
+    /** @type {(() => void) | null} */
     let unlistenProgress = null;
+    /** @type {(() => void) | null} */
     let unlistenComplete = null;
+    /** @type {(() => void) | null} */
     let unlistenError = null;
 
     onMount(async () => {
