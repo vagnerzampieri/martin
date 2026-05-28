@@ -5,13 +5,11 @@
     import { t, locale } from "./i18n.js";
     import { formatDate, formatDuration } from "./format.js";
     import { finalizeProgress, beginFinalize } from "./finalizeProgress.js";
+    import { recordingState, beginRecord, endRecord } from "./recordingState.js";
 
-    let recording = $state(false);
     let processing = $state(false);
     let importing = $state(false);
     let error = $state("");
-    let elapsed = $state(0);
-    let timer = null;
 
     let pendingRecordings = $state([]);
 
@@ -35,7 +33,6 @@
     });
 
     onDestroy(() => {
-        if (timer) clearInterval(timer);
         window.removeEventListener("finalize:complete", handleFinalizeComplete);
         window.removeEventListener("finalize:error", handleFinalizeError);
     });
@@ -52,9 +49,7 @@
         try {
             error = "";
             await invoke("start_recording");
-            recording = true;
-            elapsed = 0;
-            timer = setInterval(() => { elapsed += 1; }, 1000);
+            beginRecord();
         } catch (e) {
             error = e;
         }
@@ -62,9 +57,7 @@
 
     async function stopRecording() {
         try {
-            clearInterval(timer);
-            timer = null;
-            recording = false;
+            endRecord();
             processing = true;
             const pending = await invoke("stop_recording");
             pendingRecordings = [pending, ...pendingRecordings];
@@ -161,10 +154,10 @@
 </script>
 
 <div class="recorder">
-    {#if recording}
+    {#if $recordingState.recording}
         <div class="status recording">
             <span class="dot"></span>
-            {t("recording")} {formatTime(elapsed)}
+            {t("recording")} {formatTime($recordingState.elapsed)}
         </div>
         <button class="btn-stop" onclick={stopRecording}>
             {t("stopRecording")}
@@ -190,7 +183,7 @@
         <div class="error">{error}</div>
     {/if}
 
-    {#if !recording && !processing && pendingRecordings.length > 0}
+    {#if !$recordingState.recording && !processing && pendingRecordings.length > 0}
         <div class="pending">
             <h3>{t("pendingRecordings")}</h3>
             <ul>
