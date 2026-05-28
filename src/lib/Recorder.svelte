@@ -6,8 +6,6 @@
     import { formatDate, formatDuration } from "./format.js";
     import { finalizeProgress, beginFinalize } from "./finalizeProgress.js";
 
-    let { onTranscribed } = $props();
-
     let recording = $state(false);
     let processing = $state(false);
     let importing = $state(false);

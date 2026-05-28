@@ -103,7 +103,7 @@
     </header>
 
     {#if currentView === "recorder"}
-        <Recorder onTranscribed={showTranscription} />
+        <Recorder />
     {:else if currentView === "dictation"}
         <Dictation onTranscribed={showTranscription} />
     {:else if currentView === "history"}
