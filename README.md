@@ -25,6 +25,7 @@ Two modes: **Record** meetings with dual audio capture (mic + system), or **Dict
 - **Import audio files** — bring in existing audio (mp3, m4a, wav, ogg, flac) decoded locally with Symphonia; the file lands in the pending list and transcribes through the same flow
 - **Pending recordings** — recordings are tracked in the database, survive app restarts, and can be transcribed or deleted from a list
 - **Non-blocking stop** — stopping long recordings runs mixing in the background, UI stays responsive
+- **Record while transcribing** — start a new recording or import another file while a previous transcription is still finalizing; progress is shown as a non-modal banner at the top of the app and stays visible across tabs
 
 ### Dictation mode
 - **Real-time transcription** — speaks and sees text appear live as you talk
@@ -211,11 +212,14 @@ src/
 ├── lib/
 │   ├── i18n.js         # Locale detection + translations (pt/en)
 │   ├── format.js       # Shared date/duration formatting
-│   ├── appBusy.js      # Cross-tab "app busy" store
+│   ├── appBusy.js      # Cross-tab "app busy" store (dictation finalize)
+│   ├── finalizeProgress.js # Cross-tab store + Tauri listeners for pending-file finalize
+│   ├── recordingState.js   # Cross-tab recording state (survives navigation between tabs)
 │   ├── Recorder.svelte # Recording controls + pending recordings list
 │   ├── Dictation.svelte # Real-time dictation with state/level/provisional UI
 │   ├── VuMeter.svelte  # Audio-level meter component
-│   ├── FinalizingProgress.svelte # Progress overlay for finalize phase
+│   ├── FinalizingProgress.svelte # Modal progress overlay (dictation finalize)
+│   ├── FinalizeBanner.svelte # Non-modal banner for pending-file finalize
 │   ├── ModelDownload.svelte # Model download progress overlay
 │   ├── History.svelte  # Transcription list
 │   └── TranscriptionView.svelte  # View + copy + summarize

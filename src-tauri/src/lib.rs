@@ -51,10 +51,11 @@ fn start_recording(state: State<'_, AppState>) -> Result<(), String> {
         .as_millis();
     let audio_path = state.data_dir.join(format!("recording_{}.wav", timestamp));
 
-    let mut capture = AudioCapture::new(audio_path);
+    let mut capture = AudioCapture::new(audio_path.clone());
     capture.start()?;
     guard.0 = Some(capture);
 
+    eprintln!("[martin] start_recording path={}", audio_path.display());
     Ok(())
 }
 
@@ -75,6 +76,7 @@ async fn stop_recording(state: State<'_, AppState>) -> Result<PendingRecording, 
 
     let store = state.store.lock().map_err(|e| e.to_string())?;
     let id = store.save_pending(&file_path, duration_secs)?;
+    eprintln!("[martin] stop_recording pending_id={} duration={:.1}s", id, duration_secs);
     store.get_pending(id)
 }
 

@@ -9,19 +9,41 @@
     import { onMount } from "svelte";
     import ModelDownload from "../lib/ModelDownload.svelte";
     import { appBusy } from "../lib/appBusy.js";
+    import FinalizeBanner from "../lib/FinalizeBanner.svelte";
+    import { initFinalizeListeners } from "../lib/finalizeProgress.js";
+    import { recordingState } from "../lib/recordingState.js";
 
     let currentView = $state("recorder");
     let selectedTranscription = $state(null);
     let modelReady = $state(true);
     let checkingModel = $state(true);
 
-    onMount(async () => {
-        try {
-            modelReady = await invoke("check_model_exists");
-        } catch {
-            modelReady = false;
-        }
-        checkingModel = false;
+    onMount(() => {
+        (async () => {
+            try {
+                modelReady = await invoke("check_model_exists");
+            } catch {
+                modelReady = false;
+            }
+            checkingModel = false;
+
+            await initFinalizeListeners();
+        })().catch(console.error);
+
+        /** @param {Event} e */
+        const onComplete = (e) => {
+            // Don't yank the user away from an active recording — the backend
+            // keeps capturing, but the next mount of <Recorder> would lose the
+            // visible "Recording…" UI. The new transcription shows up in
+            // History when the user navigates there.
+            if ($recordingState.recording) return;
+            const detail = /** @type {CustomEvent} */ (e).detail;
+            if (detail) showTranscription(detail);
+        };
+        window.addEventListener("finalize:complete", onComplete);
+        return () => {
+            window.removeEventListener("finalize:complete", onComplete);
+        };
     });
 
     function onModelDownloaded() {
@@ -54,6 +76,7 @@
 </script>
 
 <main>
+    <FinalizeBanner />
     {#if !checkingModel && !modelReady}
         <ModelDownload onComplete={onModelDownloaded} onError={onModelError} />
     {/if}
@@ -86,7 +109,7 @@
     </header>
 
     {#if currentView === "recorder"}
-        <Recorder onTranscribed={showTranscription} />
+        <Recorder />
     {:else if currentView === "dictation"}
         <Dictation onTranscribed={showTranscription} />
     {:else if currentView === "history"}

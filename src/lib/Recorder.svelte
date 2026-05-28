@@ -1,95 +1,40 @@
 <script>
     import { invoke } from "@tauri-apps/api/core";
-    import { listen } from "@tauri-apps/api/event";
     import { open } from "@tauri-apps/plugin-dialog";
     import { onMount, onDestroy } from "svelte";
     import { t, locale } from "./i18n.js";
     import { formatDate, formatDuration } from "./format.js";
-    import { appBusy } from "./appBusy.js";
-    import FinalizingProgress from "./FinalizingProgress.svelte";
+    import { finalizeProgress, beginFinalize } from "./finalizeProgress.js";
+    import { recordingState, beginRecord, endRecord } from "./recordingState.js";
 
-    let { onTranscribed } = $props();
-
-    let recording = $state(false);
     let processing = $state(false);
     let importing = $state(false);
     let error = $state("");
-    let elapsed = $state(0);
-    let timer = null;
 
     let pendingRecordings = $state([]);
 
-    let liveText = $state("");
-    let percent = $state(0);
-    /** @type {"idle" | "finalizing" | "cancelling"} */
-    let phase = $state("idle");
-    let pendingDurationLabel = $state("");
-    /** @type {number | null} */
-    let startedFromPendingId = null;
-    /** @type {Array<() => void>} */
-    let unlisteners = [];
+    function handleFinalizeComplete() {
+        const removeId = $finalizeProgress.startedFromPendingId;
+        if (removeId !== null) {
+            pendingRecordings = pendingRecordings.filter((p) => p.id !== removeId);
+        }
+    }
 
-    function isFinalizing() {
-        return phase === "finalizing" || phase === "cancelling";
+    /** @param {Event} e */
+    function handleFinalizeError(e) {
+        const detail = /** @type {CustomEvent<string>} */ (e).detail;
+        error = detail ?? "Transcription error";
     }
 
     onMount(async () => {
         await loadPending();
-
-        unlisteners.push(
-            await listen("transcription://text", (event) => {
-                if (!isFinalizing()) return;
-                const incoming = event.payload.text ?? "";
-                if (incoming.length > liveText.length) {
-                    liveText = incoming;
-                }
-            }),
-            await listen("transcription://progress", (event) => {
-                if (!isFinalizing()) return;
-                percent = event.payload.percent;
-            }),
-            await listen("transcription://complete", (event) => {
-                if (!isFinalizing()) return;
-                const transcription = event.payload.transcription;
-                if (startedFromPendingId !== null) {
-                    pendingRecordings = pendingRecordings.filter(
-                        (p) => p.id !== startedFromPendingId,
-                    );
-                }
-                percent = 100;
-                setTimeout(() => {
-                    phase = "idle";
-                    appBusy.set(false);
-                    liveText = "";
-                    percent = 0;
-                    pendingDurationLabel = "";
-                    startedFromPendingId = null;
-                }, 250);
-                onTranscribed?.(transcription);
-            }),
-            await listen("transcription://cancelled", (_event) => {
-                if (!isFinalizing()) return;
-                phase = "idle";
-                appBusy.set(false);
-                liveText = "";
-                percent = 0;
-                pendingDurationLabel = "";
-                startedFromPendingId = null;
-            }),
-            await listen("transcription://error", (event) => {
-                if (!isFinalizing()) return;
-                error = event.payload.error;
-                phase = "idle";
-                appBusy.set(false);
-                pendingDurationLabel = "";
-                startedFromPendingId = null;
-            }),
-        );
+        window.addEventListener("finalize:complete", handleFinalizeComplete);
+        window.addEventListener("finalize:error", handleFinalizeError);
     });
 
     onDestroy(() => {
-        if (timer) clearInterval(timer);
-        for (const u of unlisteners) u();
+        window.removeEventListener("finalize:complete", handleFinalizeComplete);
+        window.removeEventListener("finalize:error", handleFinalizeError);
     });
 
     async function loadPending() {
@@ -104,9 +49,7 @@
         try {
             error = "";
             await invoke("start_recording");
-            recording = true;
-            elapsed = 0;
-            timer = setInterval(() => { elapsed += 1; }, 1000);
+            beginRecord();
         } catch (e) {
             error = e;
         }
@@ -114,9 +57,7 @@
 
     async function stopRecording() {
         try {
-            clearInterval(timer);
-            timer = null;
-            recording = false;
+            endRecord();
             processing = true;
             const pending = await invoke("stop_recording");
             pendingRecordings = [pending, ...pendingRecordings];
@@ -159,41 +100,39 @@
         }
     }
 
+    /** @param {number} id */
     async function transcribePending(id) {
         try {
             error = "";
             const pending = pendingRecordings.find((p) => p.id === id);
-            startedFromPendingId = id;
-            if (pending && typeof pending.duration_secs === "number") {
-                pendingDurationLabel = `${t("recordedDuration")} ${formatDuration(pending.duration_secs)}`;
-            }
-            phase = "finalizing";
-            appBusy.set(true);
-            liveText = "";
-            percent = 0;
+            const jobLabel =
+                pending && typeof pending.duration_secs === "number"
+                    ? `${t("recordedDuration")} ${formatDuration(pending.duration_secs)}`
+                    : "";
             const now = new Date().toLocaleString(
                 locale === "pt" ? "pt-BR" : "en-US",
             );
-            await invoke("transcribe_pending_recording", {
+            // Optimistically flip the global finalize state so the banner shows
+            // immediately, before awaiting the (long) invoke.
+            beginFinalize({ id: null, pendingId: id, jobLabel });
+            const newId = await invoke("transcribe_pending_recording", {
                 pendingId: id,
                 title: `${t("meetingTitle")} ${now}`,
                 language: locale,
             });
+            // Fill in the row id now that the backend returned it.
+            finalizeProgress.update((s) => ({ ...s, id: newId }));
         } catch (e) {
             error = e;
-            phase = "idle";
-            appBusy.set(false);
-            startedFromPendingId = null;
-            pendingDurationLabel = "";
-        }
-    }
-
-    async function requestCancel() {
-        try {
-            phase = "cancelling";
-            await invoke("cancel_job");
-        } catch (e) {
-            error = e;
+            // Roll back the optimistic store flip.
+            finalizeProgress.set({
+                id: null,
+                percent: 0,
+                liveText: "",
+                phase: "idle",
+                jobLabel: "",
+                startedFromPendingId: null,
+            });
         }
     }
 
@@ -215,10 +154,10 @@
 </script>
 
 <div class="recorder">
-    {#if recording}
+    {#if $recordingState.recording}
         <div class="status recording">
             <span class="dot"></span>
-            {t("recording")} {formatTime(elapsed)}
+            {t("recording")} {formatTime($recordingState.elapsed)}
         </div>
         <button class="btn-stop" onclick={stopRecording}>
             {t("stopRecording")}
@@ -227,7 +166,7 @@
         <div class="status processing">
             {t("processingAudio")}
         </div>
-    {:else if phase === "idle"}
+    {:else}
         {#if importing}
             <div class="status processing">{t("importing")}</div>
         {:else}
@@ -244,15 +183,7 @@
         <div class="error">{error}</div>
     {/if}
 
-    {#if phase === "finalizing" || phase === "cancelling"}
-        <FinalizingProgress
-            {percent}
-            {liveText}
-            cancelling={phase === "cancelling"}
-            jobLabel={pendingDurationLabel}
-            onCancel={requestCancel}
-        />
-    {:else if !recording && !processing && pendingRecordings.length > 0}
+    {#if !$recordingState.recording && !processing && pendingRecordings.length > 0}
         <div class="pending">
             <h3>{t("pendingRecordings")}</h3>
             <ul>
@@ -266,6 +197,9 @@
                             <button
                                 class="btn-transcribe"
                                 onclick={() => transcribePending(pending.id)}
+                                disabled={$finalizeProgress.phase !== "idle"}
+                                aria-disabled={$finalizeProgress.phase !== "idle"}
+                                title={$finalizeProgress.phase !== "idle" ? t("transcribeBusy") : ""}
                             >
                                 {t("transcribe")}
                             </button>
