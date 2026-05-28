@@ -6,10 +6,12 @@
 
     let { onSelect } = $props();
 
+    /** @type {Array<{id: number, summary?: string, [key: string]: any}>} */
     let transcriptions = $state([]);
     let loading = $state(true);
     let error = $state("");
     let claudeAvailable = $state(false);
+    /** @type {number | null} */
     let summarizingId = $state(null);
 
     onMount(async () => {
@@ -28,6 +30,7 @@
         }
     });
 
+    /** @param {number} id */
     async function summarize(id) {
         summarizingId = id;
         error = "";
@@ -42,6 +45,7 @@
         summarizingId = null;
     }
 
+    /** @param {number} id */
     async function remove(id) {
         try {
             await invoke("delete_transcription", { id });
