@@ -32,7 +32,12 @@ impl Transcriber {
     }
 
     #[allow(dead_code)]
-    pub fn transcribe(&self, audio_path: &Path, language: &str) -> Result<String, String> {
+    pub fn transcribe(
+        &self,
+        audio_path: &Path,
+        language: &str,
+        initial_prompt: Option<&str>,
+    ) -> Result<String, String> {
         let samples = Self::load_wav_as_mono_f32(audio_path)?;
 
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
@@ -42,6 +47,9 @@ impl Transcriber {
         params.set_print_progress(false);
         params.set_print_realtime(false);
         params.set_print_timestamps(true);
+        if let Some(prompt) = initial_prompt {
+            params.set_initial_prompt(prompt);
+        }
 
         let mut state = self
             .ctx
@@ -66,7 +74,12 @@ impl Transcriber {
 
     /// Transcribe pre-processed audio samples (mono f32 at 16kHz).
     /// Used by dictation mode where audio comes from a buffer, not a file.
-    pub fn transcribe_samples(&self, samples: &[f32], language: &str) -> Result<String, String> {
+    pub fn transcribe_samples(
+        &self,
+        samples: &[f32],
+        language: &str,
+        initial_prompt: Option<&str>,
+    ) -> Result<String, String> {
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
         params.set_n_threads(Self::default_thread_count());
         params.set_language(Some(language));
@@ -79,6 +92,9 @@ impl Transcriber {
         // `[Som de futebol]`, etc.) so dictation-style audio with
         // bursts of silence does not surface them in the transcript.
         params.set_suppress_nst(true);
+        if let Some(prompt) = initial_prompt {
+            params.set_initial_prompt(prompt);
+        }
 
         let mut state = self
             .ctx
@@ -114,6 +130,7 @@ impl Transcriber {
         &self,
         samples: &[f32],
         language: &str,
+        initial_prompt: Option<&str>,
         on_progress: P,
         mut on_segment: S,
         should_abort: A,
@@ -133,6 +150,9 @@ impl Transcriber {
         params.set_no_context(true);
         // Suppress non-speech tokens — see transcribe_samples for rationale.
         params.set_suppress_nst(true);
+        if let Some(prompt) = initial_prompt {
+            params.set_initial_prompt(prompt);
+        }
 
         params.set_progress_callback_safe(on_progress);
         params.set_segment_callback_safe_lossy(move |data: whisper_rs::SegmentCallbackData| {
@@ -397,8 +417,14 @@ mod tests {
     fn transcribe_with_callbacks_signature_compiles() {
         // Compile-time-only test: ensures the public signature is shaped correctly.
         fn _sig_check(t: &Transcriber, samples: &[f32]) {
-            let _ =
-                t.transcribe_with_callbacks(samples, "pt", |_p: i32| {}, |_seg: &str| {}, || false);
+            let _ = t.transcribe_with_callbacks(
+                samples,
+                "pt",
+                Some("PipeWire, Tauri"),
+                |_p: i32| {},
+                |_seg: &str| {},
+                || false,
+            );
         }
         let _ = _sig_check;
     }

@@ -76,7 +76,10 @@ async fn stop_recording(state: State<'_, AppState>) -> Result<PendingRecording, 
 
     let store = state.store.lock().map_err(|e| e.to_string())?;
     let id = store.save_pending(&file_path, duration_secs)?;
-    eprintln!("[martin] stop_recording pending_id={} duration={:.1}s", id, duration_secs);
+    eprintln!(
+        "[martin] stop_recording pending_id={} duration={:.1}s",
+        id, duration_secs
+    );
     store.get_pending(id)
 }
 
@@ -101,7 +104,10 @@ async fn import_audio_file(
         .map(|e| e.to_lowercase())
         .unwrap_or_default();
     if !SUPPORTED_IMPORT_EXTENSIONS.contains(&ext.as_str()) {
-        eprintln!("[martin] import_audio_file: unsupported extension '.{}'", ext);
+        eprintln!(
+            "[martin] import_audio_file: unsupported extension '.{}'",
+            ext
+        );
         return Err(format!("Unsupported file type: .{}", ext));
     }
 
@@ -130,6 +136,26 @@ fn get_or_create_transcriber(
     match cached {
         Some(t) => Ok(t),
         None => Transcriber::new(model_path),
+    }
+}
+
+/// Reads glossary terms and builds Whisper's initial prompt. Any failure
+/// (poisoned lock, DB error) degrades to no prompt — a transcription
+/// without vocabulary hints is strictly better than a failed job.
+fn glossary_prompt(store: &std::sync::Arc<Mutex<Store>>) -> Option<String> {
+    let guard = match store.lock() {
+        Ok(g) => g,
+        Err(e) => {
+            eprintln!("[martin] glossary: store lock failed: {}", e);
+            return None;
+        }
+    };
+    match guard.list_glossary_terms() {
+        Ok(terms) => transcribe::glossary::build_initial_prompt(&terms),
+        Err(e) => {
+            eprintln!("[martin] glossary: read failed: {}", e);
+            None
+        }
     }
 }
 
@@ -214,6 +240,7 @@ async fn transcribe_pending_recording(
     let language_owned = language.clone();
     let job_id = id;
     let wav_for_worker = wav_path.clone();
+    let initial_prompt = glossary_prompt(&state.store);
 
     std::thread::spawn(move || {
         let transcriber = match transcriber_taken {
@@ -242,6 +269,7 @@ async fn transcribe_pending_recording(
                 &transcriber,
                 &wav_for_worker,
                 language_owned,
+                initial_prompt,
                 store_for_worker.clone(),
                 app.clone(),
             );
@@ -346,6 +374,24 @@ fn delete_pending_recording(state: State<'_, AppState>, id: i64) -> Result<(), S
 }
 
 #[tauri::command]
+fn list_glossary_terms(state: State<'_, AppState>) -> Result<Vec<String>, String> {
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    store.list_glossary_terms()
+}
+
+#[tauri::command]
+fn add_glossary_term(state: State<'_, AppState>, term: String) -> Result<(), String> {
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    store.add_glossary_term(&term)
+}
+
+#[tauri::command]
+fn remove_glossary_term(state: State<'_, AppState>, term: String) -> Result<(), String> {
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    store.remove_glossary_term(&term)
+}
+
+#[tauri::command]
 async fn start_dictation(
     state: State<'_, AppState>,
     app_handle: tauri::AppHandle,
@@ -409,6 +455,7 @@ async fn start_dictation(
     };
     let app_for_loop = app_handle.clone();
     let language_owned = language.clone();
+    let initial_prompt = glossary_prompt(&state.store);
     let worker = std::thread::spawn(move || {
         dictation::run_transcription_loop(
             buffer,
@@ -421,6 +468,7 @@ async fn start_dictation(
             pending_paragraph_atom_for_loop,
             &transcriber,
             &language_owned,
+            initial_prompt,
             source_rate,
             channels,
             partial_id,
@@ -594,6 +642,7 @@ async fn stop_dictation(
     let app = app_handle.clone();
     let transcriber_taken = state.transcriber.lock().map_err(|e| e.to_string())?.take();
     let model_path = crate::model::model_path(&state.data_dir);
+    let initial_prompt = glossary_prompt(&state.store);
 
     std::thread::spawn(move || {
         let transcriber = match transcriber_taken {
@@ -614,6 +663,7 @@ async fn stop_dictation(
                 samples,
                 duration_secs,
                 language,
+                initial_prompt,
                 store_for_worker.clone(),
                 app.clone(),
             );
@@ -726,6 +776,9 @@ pub fn run() {
             summarize_transcription,
             list_pending_recordings,
             delete_pending_recording,
+            list_glossary_terms,
+            add_glossary_term,
+            remove_glossary_term,
             start_dictation,
             stop_dictation,
             check_model_exists,

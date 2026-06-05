@@ -59,6 +59,17 @@ const translations = {
     finalizeBannerLabel: "Transcrevendo em segundo plano",
     showDetails: "Detalhes",
     hideDetails: "Esconder",
+    glossary: "Glossário",
+    glossaryHint:
+      "Termos técnicos, nomes e siglas que a transcrição deve reconhecer melhor.",
+    glossaryPlaceholder: "Novo termo…",
+    addTerm: "Adicionar",
+    glossaryEmpty: "Nenhum termo ainda.",
+    removeTerm: "Remover",
+    glossaryLoadError: "Falha ao carregar o glossário",
+    termAlreadyExists: "Esse termo já está no glossário",
+    close: "Fechar",
+    terms: "termos",
   },
   en: {
     record: "Record",
@@ -119,6 +130,17 @@ const translations = {
     finalizeBannerLabel: "Transcribing in background",
     showDetails: "Details",
     hideDetails: "Hide",
+    glossary: "Glossary",
+    glossaryHint:
+      "Technical terms, names and acronyms transcription should recognize better.",
+    glossaryPlaceholder: "New term…",
+    addTerm: "Add",
+    glossaryEmpty: "No terms yet.",
+    removeTerm: "Remove",
+    glossaryLoadError: "Failed to load glossary",
+    termAlreadyExists: "That term is already in the glossary",
+    close: "Close",
+    terms: "terms",
   },
 };
 

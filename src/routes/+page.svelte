@@ -12,8 +12,10 @@
     import FinalizeBanner from "../lib/FinalizeBanner.svelte";
     import { initFinalizeListeners } from "../lib/finalizeProgress.js";
     import { recordingState } from "../lib/recordingState.js";
+    import Glossary from "../lib/Glossary.svelte";
 
     let currentView = $state("recorder");
+    let showGlossary = $state(false);
     /** @type {object | null} */
     let selectedTranscription = $state(null);
     let modelReady = $state(true);
@@ -79,6 +81,9 @@
 
 <main>
     <FinalizeBanner />
+    {#if showGlossary}
+        <Glossary onClose={() => (showGlossary = false)} />
+    {/if}
     {#if !checkingModel && !modelReady}
         <ModelDownload onComplete={onModelDownloaded} onError={onModelError} />
     {/if}
@@ -106,6 +111,9 @@
                 onclick={showHistory}
             >
                 {t("history")}
+            </button>
+            <button onclick={() => (showGlossary = true)}>
+                {t("glossary")}
             </button>
         </nav>
     </header>

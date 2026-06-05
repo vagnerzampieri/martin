@@ -96,12 +96,14 @@ struct CancelledPayload {
 /// The Tauri text event is emitted on every segment for live UI feedback.
 /// `finish_job`'s Complete arm performs the final authoritative write, so
 /// no data is lost if the last debounced write was skipped.
+#[allow(clippy::too_many_arguments)]
 pub fn run_finalize_dictation(
     job: &TranscriptionJob,
     transcriber: &Transcriber,
     samples: Vec<f32>,
     duration_secs: f64,
     language: String,
+    initial_prompt: Option<String>,
     store: Arc<Mutex<Store>>,
     app_handle: AppHandle,
 ) -> FinalizeOutcome {
@@ -218,6 +220,7 @@ pub fn run_finalize_dictation(
     let result = transcriber.transcribe_with_callbacks(
         &samples,
         &language,
+        initial_prompt.as_deref(),
         on_progress,
         on_segment,
         on_abort,
@@ -282,6 +285,7 @@ pub fn run_finalize_pending_file(
     transcriber: &Transcriber,
     wav_path: &std::path::Path,
     language: String,
+    initial_prompt: Option<String>,
     store: Arc<Mutex<Store>>,
     app_handle: AppHandle,
 ) -> FinalizeOutcome {
@@ -301,6 +305,7 @@ pub fn run_finalize_pending_file(
         samples,
         duration_secs,
         language,
+        initial_prompt,
         store,
         app_handle,
     )
