@@ -3,8 +3,10 @@
 //! The prompt is a plain comma-separated list — no prefix sentence, so it
 //! stays language-neutral (works for both pt and en transcriptions).
 
-/// Whisper's prompt window is ~224 tokens. 700 chars is a safe margin
-/// below that for both pt and en text.
+/// Whisper's prompt window is ~224 tokens. 700 is a safe margin below
+/// that for both pt and en text. Measured in BYTES (`str::len`), which
+/// is intentionally conservative for multi-byte text: accented terms
+/// consume budget faster, never overflowing the real token window.
 #[allow(dead_code)] // Wired in by Task 4/5
 pub const MAX_PROMPT_CHARS: usize = 700;
 
@@ -64,7 +66,11 @@ mod tests {
 
     #[test]
     fn terms_join_with_comma_and_space() {
-        let terms = vec!["PipeWire".to_string(), "Tauri".to_string(), "Svelte".to_string()];
+        let terms = vec![
+            "PipeWire".to_string(),
+            "Tauri".to_string(),
+            "Svelte".to_string(),
+        ];
         assert_eq!(
             build_initial_prompt(&terms),
             Some("PipeWire, Tauri, Svelte".to_string())
@@ -78,6 +84,13 @@ mod tests {
             build_initial_prompt(&terms),
             Some("PipeWire, Tauri".to_string())
         );
+    }
+
+    #[test]
+    fn cap_is_measured_in_bytes_for_multibyte_terms() {
+        // "ção" is 3 chars but 5 bytes; budget is consumed by bytes.
+        let term = "ç".repeat(MAX_PROMPT_CHARS / 2 + 1); // > cap in bytes, < cap in chars
+        assert_eq!(build_initial_prompt(&[term]), None);
     }
 
     #[test]
