@@ -60,6 +60,14 @@ impl Store {
         )
         .map_err(|e| format!("Failed to create pending_recordings table: {}", e))?;
 
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS glossary_terms (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                term TEXT NOT NULL UNIQUE
+            );",
+        )
+        .map_err(|e| format!("Failed to create glossary_terms table: {}", e))?;
+
         // Migration: add `status` column if missing. Idempotent — older databases
         // (created before this column existed) gain it on next launch with
         // existing rows backfilled to 'complete' via the column DEFAULT.
@@ -74,10 +82,8 @@ impl Store {
             Err(e) => return Err(format!("Failed to add status column: {}", e)),
         }
 
-        let audio_path_migration = conn.execute(
-            "ALTER TABLE transcriptions ADD COLUMN audio_path TEXT",
-            [],
-        );
+        let audio_path_migration =
+            conn.execute("ALTER TABLE transcriptions ADD COLUMN audio_path TEXT", []);
         match audio_path_migration {
             Ok(_) => {}
             Err(rusqlite::Error::SqliteFailure(_, Some(msg)))
@@ -322,6 +328,60 @@ impl Store {
 
         if affected == 0 {
             return Err(format!("Pending recording with id {} not found", id));
+        }
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    // Wired in by Task 5
+    pub fn list_glossary_terms(&self) -> Result<Vec<String>, String> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT term FROM glossary_terms ORDER BY id ASC")
+            .map_err(|e| format!("Failed to prepare glossary query: {}", e))?;
+
+        let terms = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| format!("Failed to query glossary terms: {}", e))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("Failed to read glossary terms: {}", e))?;
+
+        Ok(terms)
+    }
+
+    #[allow(dead_code)]
+    // Wired in by Task 5
+    pub fn add_glossary_term(&self, term: &str) -> Result<(), String> {
+        let term = term.trim();
+        if term.is_empty() {
+            return Err("Term cannot be empty".to_string());
+        }
+
+        self.conn
+            .execute(
+                "INSERT INTO glossary_terms (term) VALUES (?1)",
+                params![term],
+            )
+            .map_err(|e| {
+                if e.to_string().contains("UNIQUE constraint failed") {
+                    format!("Term '{}' already exists", term)
+                } else {
+                    format!("Failed to add glossary term: {}", e)
+                }
+            })?;
+
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    // Wired in by Task 5
+    pub fn remove_glossary_term(&self, term: &str) -> Result<(), String> {
+        let affected = self
+            .conn
+            .execute("DELETE FROM glossary_terms WHERE term = ?1", params![term])
+            .map_err(|e| format!("Failed to remove glossary term: {}", e))?;
+        if affected == 0 {
+            return Err(format!("Term '{}' not found", term));
         }
         Ok(())
     }
@@ -791,11 +851,9 @@ mod tests {
         let store = Store::new(&path).expect("upgrade open");
         let row: Option<String> = store
             .conn
-            .query_row(
-                "SELECT audio_path FROM transcriptions LIMIT 1",
-                [],
-                |r| r.get(0),
-            )
+            .query_row("SELECT audio_path FROM transcriptions LIMIT 1", [], |r| {
+                r.get(0)
+            })
             .expect("query");
         assert!(row.is_none());
     }
@@ -804,7 +862,9 @@ mod tests {
     fn set_audio_path_persists_and_get_returns_it() {
         let (store, _temp_file) = create_temp_store();
         let id = store.insert_partial("t", "pt").expect("insert");
-        store.set_audio_path(id, "/tmp/dictation_42.wav").expect("set");
+        store
+            .set_audio_path(id, "/tmp/dictation_42.wav")
+            .expect("set");
         let row = store.get(id).expect("get");
         assert_eq!(row.audio_path.as_deref(), Some("/tmp/dictation_42.wav"));
     }
@@ -816,5 +876,68 @@ mod tests {
         store.update_title(id, "New Title").expect("update");
         let row = store.get(id).expect("get");
         assert_eq!(row.title, "New Title");
+    }
+
+    // --- glossary tests ---
+
+    #[test]
+    fn glossary_starts_empty() {
+        let (store, _temp_file) = create_temp_store();
+        let terms = store.list_glossary_terms().expect("list failed");
+        assert!(terms.is_empty());
+    }
+
+    #[test]
+    fn add_and_list_glossary_terms_in_insertion_order() {
+        let (store, _temp_file) = create_temp_store();
+        store.add_glossary_term("PipeWire").expect("add failed");
+        store.add_glossary_term("Tauri").expect("add failed");
+
+        let terms = store.list_glossary_terms().expect("list failed");
+        assert_eq!(terms, vec!["PipeWire".to_string(), "Tauri".to_string()]);
+    }
+
+    #[test]
+    fn add_glossary_term_trims_whitespace() {
+        let (store, _temp_file) = create_temp_store();
+        store.add_glossary_term("  Whisper  ").expect("add failed");
+
+        let terms = store.list_glossary_terms().expect("list failed");
+        assert_eq!(terms, vec!["Whisper".to_string()]);
+    }
+
+    #[test]
+    fn add_glossary_term_rejects_empty() {
+        let (store, _temp_file) = create_temp_store();
+        assert!(store.add_glossary_term("   ").is_err());
+    }
+
+    #[test]
+    fn add_glossary_term_rejects_duplicates() {
+        let (store, _temp_file) = create_temp_store();
+        store.add_glossary_term("Svelte").expect("add failed");
+
+        let err = store.add_glossary_term("Svelte").unwrap_err();
+        assert!(err.contains("already"), "unexpected error: {}", err);
+    }
+
+    #[test]
+    fn remove_glossary_term_deletes_it() {
+        let (store, _temp_file) = create_temp_store();
+        store.add_glossary_term("PipeWire").expect("add failed");
+        store.add_glossary_term("Tauri").expect("add failed");
+
+        store
+            .remove_glossary_term("PipeWire")
+            .expect("remove failed");
+
+        let terms = store.list_glossary_terms().expect("list failed");
+        assert_eq!(terms, vec!["Tauri".to_string()]);
+    }
+
+    #[test]
+    fn remove_glossary_term_errors_when_missing() {
+        let (store, _temp_file) = create_temp_store();
+        assert!(store.remove_glossary_term("ghost").is_err());
     }
 }
