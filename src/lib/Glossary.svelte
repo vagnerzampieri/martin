@@ -1,6 +1,6 @@
 <script>
     import { invoke } from "@tauri-apps/api/core";
-    import { onMount } from "svelte";
+    import { onMount, tick } from "svelte";
     import { t } from "./i18n.js";
 
     let { onClose } = $props();
@@ -10,7 +10,17 @@
     let newTerm = $state("");
     let error = $state("");
 
-    onMount(loadTerms);
+    /** @type {HTMLElement | null} */
+    let lastFocused = null;
+    /** @type {HTMLInputElement | null} */
+    let inputEl = null;
+
+    onMount(async () => {
+        lastFocused = /** @type {HTMLElement | null} */ (document.activeElement);
+        await loadTerms();
+        await tick();
+        inputEl?.focus();
+    });
 
     async function loadTerms() {
         try {
@@ -21,9 +31,18 @@
         }
     }
 
+    function close() {
+        lastFocused?.focus?.();
+        onClose?.();
+    }
+
     async function addTerm() {
         const term = newTerm.trim();
         if (!term) return;
+        if (terms.includes(term)) {
+            error = t("termAlreadyExists");
+            return;
+        }
         try {
             await invoke("add_glossary_term", { term });
             newTerm = "";
@@ -50,7 +69,7 @@
 
     /** @param {KeyboardEvent} e */
     function onOverlayKeydown(e) {
-        if (e.key === "Escape") onClose?.();
+        if (e.key === "Escape") close();
     }
 </script>
 
@@ -59,7 +78,7 @@
 <div
     class="overlay"
     role="presentation"
-    onclick={(e) => e.target === e.currentTarget && onClose?.()}
+    onclick={(e) => e.target === e.currentTarget && close()}
 >
     <div
         class="modal"
@@ -76,6 +95,7 @@
         <div class="add-row">
             <input
                 type="text"
+                bind:this={inputEl}
                 bind:value={newTerm}
                 placeholder={t("glossaryPlaceholder")}
                 onkeydown={onInputKeydown}
@@ -110,7 +130,7 @@
         {/if}
 
         <footer>
-            <button class="close" onclick={() => onClose?.()}>
+            <button class="close" onclick={close}>
                 {t("close")}
             </button>
         </footer>
