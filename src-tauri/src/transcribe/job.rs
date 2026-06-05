@@ -218,6 +218,7 @@ pub fn run_finalize_dictation(
     let result = transcriber.transcribe_with_callbacks(
         &samples,
         &language,
+        None,
         on_progress,
         on_segment,
         on_abort,
