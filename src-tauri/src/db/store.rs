@@ -332,8 +332,6 @@ impl Store {
         Ok(())
     }
 
-    #[allow(dead_code)]
-    // Wired in by Task 5
     pub fn list_glossary_terms(&self) -> Result<Vec<String>, String> {
         let mut stmt = self
             .conn
@@ -349,8 +347,6 @@ impl Store {
         Ok(terms)
     }
 
-    #[allow(dead_code)]
-    // Wired in by Task 5
     pub fn add_glossary_term(&self, term: &str) -> Result<(), String> {
         let term = term.trim();
         if term.is_empty() {
@@ -373,8 +369,6 @@ impl Store {
         Ok(())
     }
 
-    #[allow(dead_code)]
-    // Wired in by Task 5
     pub fn remove_glossary_term(&self, term: &str) -> Result<(), String> {
         let affected = self
             .conn

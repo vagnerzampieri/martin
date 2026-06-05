@@ -374,6 +374,24 @@ fn delete_pending_recording(state: State<'_, AppState>, id: i64) -> Result<(), S
 }
 
 #[tauri::command]
+fn list_glossary_terms(state: State<'_, AppState>) -> Result<Vec<String>, String> {
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    store.list_glossary_terms()
+}
+
+#[tauri::command]
+fn add_glossary_term(state: State<'_, AppState>, term: String) -> Result<(), String> {
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    store.add_glossary_term(&term)
+}
+
+#[tauri::command]
+fn remove_glossary_term(state: State<'_, AppState>, term: String) -> Result<(), String> {
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    store.remove_glossary_term(&term)
+}
+
+#[tauri::command]
 async fn start_dictation(
     state: State<'_, AppState>,
     app_handle: tauri::AppHandle,
@@ -758,6 +776,9 @@ pub fn run() {
             summarize_transcription,
             list_pending_recordings,
             delete_pending_recording,
+            list_glossary_terms,
+            add_glossary_term,
+            remove_glossary_term,
             start_dictation,
             stop_dictation,
             check_model_exists,
