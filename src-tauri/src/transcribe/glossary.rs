@@ -7,13 +7,11 @@
 /// that for both pt and en text. Measured in BYTES (`str::len`), which
 /// is intentionally conservative for multi-byte text: accented terms
 /// consume budget faster, never overflowing the real token window.
-#[allow(dead_code)] // Wired in by Task 4/5
 pub const MAX_PROMPT_CHARS: usize = 700;
 
 /// Joins glossary terms into a comma-separated prompt, dropping terms
 /// (in insertion order) once the cap would be exceeded. Returns `None`
 /// when no term fits — callers then transcribe without a prompt.
-#[allow(dead_code)] // Wired in by Task 4/5
 pub fn build_initial_prompt(terms: &[String]) -> Option<String> {
     let mut prompt = String::new();
 

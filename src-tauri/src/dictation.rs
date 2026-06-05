@@ -335,6 +335,7 @@ pub fn run_transcription_loop(
     pending_paragraph_break_atom: Arc<AtomicBool>,
     transcriber: &Transcriber,
     language: &str,
+    initial_prompt: Option<String>,
     source_rate: u32,
     channels: u16,
     partial_id: i64,
@@ -392,7 +393,9 @@ pub fn run_transcription_loop(
             // appears between paragraphs, not before an empty next chunk.
             if consecutive_silent_polls == PARAGRAPH_PAUSE_POLLS && !accumulated_raw.is_empty() {
                 let mono_16k = convert_to_mono_16k(&accumulated_raw, channels, source_rate);
-                if let Ok(text) = transcriber.transcribe_samples(&mono_16k, language, None) {
+                if let Ok(text) =
+                    transcriber.transcribe_samples(&mono_16k, language, initial_prompt.as_deref())
+                {
                     let text = text.trim().to_string();
                     if !text.is_empty() {
                         committed_segments.push(text.clone());
@@ -440,13 +443,14 @@ pub fn run_transcription_loop(
         last_transcribed_raw_len_atom.store(last_transcribed_len, Ordering::Release);
 
         state.store(STATE_PROCESSING, Ordering::Release);
-        let pass_text = match transcriber.transcribe_samples(&mono_16k, language, None) {
-            Ok(text) => text.trim().to_string(),
-            Err(e) => {
-                eprintln!("Dictation transcription error: {}", e);
-                String::new()
-            }
-        };
+        let pass_text =
+            match transcriber.transcribe_samples(&mono_16k, language, initial_prompt.as_deref()) {
+                Ok(text) => text.trim().to_string(),
+                Err(e) => {
+                    eprintln!("Dictation transcription error: {}", e);
+                    String::new()
+                }
+            };
         // Back to LISTENING unless the silence detector has already flipped us
         // to PAUSED in a subsequent (unlikely, this is the same thread) tick.
         let _ = state.compare_exchange(
