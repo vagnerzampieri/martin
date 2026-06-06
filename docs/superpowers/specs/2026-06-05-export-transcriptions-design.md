@@ -28,11 +28,11 @@ CREATE TABLE IF NOT EXISTS segments (
 );
 ```
 
-**Captura:** os métodos de extração em `whisper.rs` passam a extrair também `t0`/`t1` por segmento (whisper devolve centissegundos → converter para ms) e retornam `Vec<Segment>` em vez de `String` joined. O texto completo continua derivado do join — comportamento atual preservado.
+**Captura:** apenas `transcribe_with_callbacks` em `whisper.rs` precisa mudar — é o único método usado pelos fluxos que persistem transcrições. O callback `on_segment` passa a receber também `start_ms`/`end_ms` (whisper devolve centissegundos via `SegmentCallbackData` → converter para ms). `transcribe` (dead code) e `transcribe_samples` (loop ao vivo do ditado, não persiste) ficam intactos.
 
-**Persistência:** no fluxo de `transcribe/job.rs`, após salvar a transcrição, salvar os segmentos (`store.save_segments(transcription_id, &segments)`). Delete limpa via `ON DELETE CASCADE` — confirmar/ativar `PRAGMA foreign_keys = ON` na conexão.
+**Persistência:** `run_finalize_dictation` coleta os segmentos e os devolve em `FinalizeOutcome::Complete`; `finish_job` salva via `store.save_segments(transcription_id, &segments)`. Segmentos só são coletados quando `job.committed_text` está vazio (whisper processou o áudio inteiro) — no ditado com prefixo do loop ao vivo, o finalize roda só na cauda e os timestamps não cobririam a gravação toda. Gravações e imports (caso de uso real de SRT) sempre ganham segmentos. Delete limpa via `ON DELETE CASCADE` — ativar `PRAGMA foreign_keys = ON` na conexão.
 
-**Transcrições antigas:** sem linhas em `segments` → SRT indisponível.
+**Transcrições antigas e ditados com prefixo ao vivo:** sem linhas em `segments` → SRT indisponível.
 
 ## Parte 2 — Módulo de export (Rust)
 
